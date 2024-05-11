@@ -2,7 +2,7 @@
 # https://nixos.wiki/wiki/Full_Disk_Encryption#Option_2:_Copy_Key_as_file_onto_a_vfat_usb_stick
 # this, with `preOpenCommands` works
 # https://github.com/nix-community/disko/issues/289
-{ unlockUuid1, unlockUuid2 }:
+{ unlockDisk1, unlockDisk2 }:
 { config, lib, pkgs, ... }:
 
 {
@@ -19,7 +19,7 @@
       preOpenCommands = ''
         mkdir -m 0700 -p /key
         sleep 2 # To make sure the usb key has been loaded
-        mount -n -t vfat -o ro `findfs UUID=${unlockUuid1}` /key || mount -n -t vfat -o ro `findfs UUID=${unlockUuid2}` /key
+        mount -n -t ${unlockDisk1.fs} -o ro `findfs ${unlockDisk1.tag}=${unlockDisk1.value}` /key || mount -n -t ${unlockDisk2.fs} -o ro `findfs ${unlockDisk2.tag}=${unlockDisk2.value}` /key
       '';
       postOpenCommands = ''
         umount /key
