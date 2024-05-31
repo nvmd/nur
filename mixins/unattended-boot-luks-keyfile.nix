@@ -16,17 +16,19 @@
   boot.initrd.luks.devices = let
     deviceName = "cryptroot";
     machineId = config.networking.hostName;
+    unlockDiskMountPoint = "/key";
+    mountUnlockDisk = disk: "mount -n -t ${disk.fs} -o ro `findfs ${disk.tag}=${disk.value}` ${unlockDiskMountPoint}";
   in {
     "${deviceName}" = {  # DISKO UNATTENDED BOOT
-      keyFile = "/key/${machineId}-${deviceName}.keyfile";
+      keyFile = "${unlockDiskMountPoint}/${machineId}-${deviceName}.keyfile";
       # both /dev/disk/by-uuid/${unlockUuid1} and findfs UUID=${unlockUuid1} work
       preOpenCommands = ''
-        mkdir -m 0700 -p /key
+        mkdir -m 0700 -p ${unlockDiskMountPoint}
         sleep 2 # To make sure the usb key has been loaded
-        mount -n -t ${unlockDisk1.fs} -o ro `findfs ${unlockDisk1.tag}=${unlockDisk1.value}` /key || mount -n -t ${unlockDisk2.fs} -o ro `findfs ${unlockDisk2.tag}=${unlockDisk2.value}` /key
+        ${mountUnlockDisk unlockDisk1} || ${mountUnlockDisk unlockDisk2}
       '';
       postOpenCommands = ''
-        umount /key
+        umount ${unlockDiskMountPoint}
       '';
       fallbackToPassword = true;
     };
