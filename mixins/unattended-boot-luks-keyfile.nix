@@ -7,7 +7,11 @@
 
 {
   # Kernel modules needed for mounting USB VFAT devices in initrd stage
-  boot.initrd.kernelModules = ["uas" "usbcore" "usb_storage" "vfat" "nls_cp437" "nls_iso8859_1"];
+  boot.initrd.kernelModules = [
+    "uas" "usbcore" "usb_storage"
+    "vfat" "nls_cp437" "nls_iso8859_1"
+    "ext4"  # in case ext4 is not configured as builtin
+  ];
 
   boot.initrd.luks.devices = let
     deviceName = "cryptroot";
