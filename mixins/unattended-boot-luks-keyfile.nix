@@ -33,4 +33,28 @@
       fallbackToPassword = true;
     };
   };
+
+  services.udev.extraRules = let
+    mkExcludeUnattendedBootDisk = disk: let
+      envTag = {
+        "UUID" = "ENV{ID_FS_UUID}";
+        "PARTLABEL" = "ENV{PARTNAME}";
+      }.${disk.tag};
+      value = disk.value;
+    in ''
+      SUBSYSTEM=="block", ${envTag}=="${value}", ENV{UDISKS_IGNORE}="1"
+    '';
+  in ''
+    # udisks2
+    # some inspiration on how to debug when partitions still get mounted:
+    #  https://github.com/storaged-project/udisks/issues/788
+    #  with `udevadm info /dev/sda1`, `udevadm monitor`, ...
+    #  example – "official" ignore file
+    #  https://github.com/storaged-project/udisks/blob/master/data/80-udisks2.rules
+    #SUBSYSTEM=="block", ENV{ID_FS_UUID}=="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX", ENV{UDISKS_IGNORE}="1"
+
+    # ignore unattended boot luks keyfile partitions
+    ${mkExcludeUnattendedBootDisk unlockDisk1}
+    ${mkExcludeUnattendedBootDisk unlockDisk2}
+  '';
 }
