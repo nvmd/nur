@@ -8,6 +8,12 @@ in {
 
     enable = lib.mkEnableOption "unattended-boot-luks-keyfile";
 
+    luksDeviceName = lib.mkOption {
+      type = lib.types.str;
+      default = "cryptroot";
+      description = "name of the device to unlock";
+    };
+
     unlockDisks = lib.mkOption {
       type = lib.types.attrs;
       default = {};
@@ -36,7 +42,7 @@ in {
     ] ++ lib.mapAttrsToList (name: value: value.fs) cfg.unlockDisks;
 
     boot.initrd.luks.devices = let
-      deviceName = "cryptroot";
+      deviceName = cfg.luksDeviceName;
       machineId = config.networking.hostName;
       unlockDiskMountPoint = "/key";
       mountUnlockDisk = disk: "mount -n -t ${disk.fs} -o ro `findfs ${disk.tag}=${disk.value}` ${unlockDiskMountPoint}";
