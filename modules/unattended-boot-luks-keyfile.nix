@@ -24,12 +24,16 @@ in {
     # this, with `preOpenCommands` works
     # https://github.com/nix-community/disko/issues/289
 
-    # Kernel modules needed for mounting USB VFAT devices in initrd stage
+    # explicitly add kernel modules needed for mounting:
+    # * USB VFAT devices in initrd stage
+    # * any other filesystems used in `unlockDisks`,
+    # ... assuming its loadable module name matches fs type as used
+    # ... in `mount -t <fs type>`
+    # (i.e. don't exclusively rely on what's built-in into the kernel)
     boot.initrd.kernelModules = [
       "uas" "usbcore" "usb_storage"
       "vfat" "nls_cp437" "nls_iso8859_1"
-      "ext4"  # in case ext4 is not configured as builtin
-    ];
+    ] ++ lib.mapAttrsToList (name: value: value.fs) cfg.unlockDisks;
 
     boot.initrd.luks.devices = let
       deviceName = "cryptroot";
