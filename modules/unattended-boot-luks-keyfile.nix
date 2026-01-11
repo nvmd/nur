@@ -8,21 +8,17 @@ in {
 
     enable = lib.mkEnableOption "unattended-boot-luks-keyfile";
 
-    unlockDisk1 = lib.mkOption {
+    unlockDisks = lib.mkOption {
       type = lib.types.attrs;
       default = {};
-      description = "unattendedBootDisk1";
-    };
-
-    unlockDisk2 = lib.mkOption {
-      type = lib.types.attrs;
-      default = {};
-      description = "unattendedBootDisk2";
+      description = "disks for unattended luks partition unlock";
     };
 
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable (let
+    mapUnlockDisksToStr = sep: f: lib.concatMapAttrsStringSep sep (name: value: f value) cfg.unlockDisks;
+  in {
     # this didn't work for me
     # https://nixos.wiki/wiki/Full_Disk_Encryption#Option_2:_Copy_Key_as_file_onto_a_vfat_usb_stick
     # this, with `preOpenCommands` works
@@ -40,6 +36,7 @@ in {
       machineId = config.networking.hostName;
       unlockDiskMountPoint = "/key";
       mountUnlockDisk = disk: "mount -n -t ${disk.fs} -o ro `findfs ${disk.tag}=${disk.value}` ${unlockDiskMountPoint}";
+      mountAnyUnlockDisk = mapUnlockDisksToStr " || " mountUnlockDisk;
     in {
       "${deviceName}" = {  # DISKO UNATTENDED BOOT
         keyFile = "${unlockDiskMountPoint}/${machineId}-${deviceName}.keyfile";
@@ -47,7 +44,7 @@ in {
         preOpenCommands = ''
           mkdir -m 0700 -p ${unlockDiskMountPoint}
           sleep 2 # To make sure the usb key has been loaded
-          ${mountUnlockDisk cfg.unlockDisk1} || ${mountUnlockDisk cfg.unlockDisk2}
+          ${mountAnyUnlockDisk}
         '';
         postOpenCommands = ''
           umount ${unlockDiskMountPoint}
@@ -57,16 +54,14 @@ in {
     };
 
     services.udev.extraRules = let
-      mkExcludeUnattendedBootDisk = disk: let
+      ignoreAllUnlockDisks = mapUnlockDisksToStr "\n" ignoreUnlockDiskRule;
+      ignoreUnlockDiskRule = disk: let
         envTag = {
           "UUID" = "ENV{ID_FS_UUID}";
           "PARTLABEL" = "ENV{PARTNAME}";
         }.${disk.tag};
         value = disk.value;
-      in ''
-        SUBSYSTEM=="block", ${envTag}=="${value}", ENV{UDISKS_IGNORE}="1"
-      '';
-    in ''
+      in ''SUBSYSTEM=="block", ${envTag}=="${value}", ENV{UDISKS_IGNORE}="1"'';
       # udisks2
       # some inspiration on how to debug when partitions still get mounted:
       #  https://github.com/storaged-project/udisks/issues/788
@@ -74,12 +69,11 @@ in {
       #  example – "official" ignore file
       #  https://github.com/storaged-project/udisks/blob/master/data/80-udisks2.rules
       #SUBSYSTEM=="block", ENV{ID_FS_UUID}=="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXXX", ENV{UDISKS_IGNORE}="1"
-
-      # ignore unattended boot luks keyfile partitions
-      ${mkExcludeUnattendedBootDisk cfg.unlockDisk1}
-      ${mkExcludeUnattendedBootDisk cfg.unlockDisk2}
+    in ''
+      # ignore luks keyfile partitions used for unattended boot
+      ${ignoreAllUnlockDisks}
     '';
 
-  };
+  });
 
 }
