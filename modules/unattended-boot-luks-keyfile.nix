@@ -8,24 +8,24 @@ in {
 
     enable = lib.mkEnableOption "unattended-boot-luks-keyfile";
 
-    luksDeviceName = lib.mkOption {
-      type = lib.types.str;
-      default = "cryptroot";
-      description = "name of the device to unlock";
-    };
-
-    unlockDisks = lib.mkOption {
-      type = lib.types.attrs;
+    luksDevices = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule {
+        freeformType = lib.types.attrsOf lib.types.attrs;
+      });
       default = {};
-      description = "disks for unattended luks partition unlock";
+      description = ''
+        disks for unattended luks partition unlock for the corresponding luks
+        device
+      '';
     };
 
   };
 
   config = let
-    deviceName = cfg.luksDeviceName;
     unlockDiskMountPoint = "/key";
-    mapUnlockDisksToStr = sep: f: lib.concatMapAttrsStringSep sep (name: value: f value) cfg.unlockDisks;
+    mapUnlockDisksToStr = disks: sep: f: lib.concatMapStringsSep sep (value: f value) disks;
+    unlockDisks = luksDevice: lib.attrValues luksDevice;
+    allUnlockDisks = lib.concatLists (lib.map lib.attrValues (lib.attrValues cfg.luksDevices));
   in lib.mkMerge [
     (lib.mkIf cfg.enable {
 
@@ -38,10 +38,10 @@ in {
       boot.initrd.kernelModules = [
         "uas" "usbcore" "usb_storage"
         "vfat" "nls_cp437" "nls_iso8859_1"
-      ] ++ lib.mapAttrsToList (name: value: value.fs) cfg.unlockDisks;
+      ] ++ lib.map (disk: disk.fs) allUnlockDisks;
 
       services.udev.extraRules = let
-        ignoreAllUnlockDisks = mapUnlockDisksToStr "\n" ignoreUnlockDiskRule;
+        ignoreAllUnlockDisks = mapUnlockDisksToStr allUnlockDisks "\n" ignoreUnlockDiskRule;
         ignoreUnlockDiskRule = disk: let
           envTag = {
             "UUID" = "ENV{ID_FS_UUID}";
@@ -62,13 +62,12 @@ in {
       '';
 
       boot.initrd.luks.devices = let
-        deviceName = cfg.luksDeviceName;
-        machineId = config.networking.hostName;
-      in {
-        "${deviceName}" = {  # DISKO UNATTENDED BOOT
+        configureLuksDevice = deviceName: unlockDisksAttrs: let
+          machineId = config.networking.hostName;
+        in {  # DISKO UNATTENDED BOOT
           keyFile = "${unlockDiskMountPoint}/${machineId}-${deviceName}.keyfile";
         };
-      };
+      in lib.mapAttrs configureLuksDevice cfg.luksDevices;
 
     })
 
@@ -79,10 +78,10 @@ in {
       # https://github.com/nix-community/disko/issues/289
 
       boot.initrd.luks.devices = let
-        mountUnlockDisk = disk: "mount -n -t ${disk.fs} -o ro `findfs ${disk.tag}=${disk.value}` ${unlockDiskMountPoint}";
-        mountAnyUnlockDisk = mapUnlockDisksToStr " || " mountUnlockDisk;
-      in {
-        "${deviceName}" = {  # DISKO UNATTENDED BOOT
+        configureLuksDevice = deviceName: unlockDisksAttrs: let
+          mountUnlockDisk = disk: "mount -n -t ${disk.fs} -o ro `findfs ${disk.tag}=${disk.value}` ${unlockDiskMountPoint}";
+          mountAnyUnlockDisk = mapUnlockDisksToStr (unlockDisks unlockDisksAttrs) " || " mountUnlockDisk;
+        in {  # DISKO UNATTENDED BOOT
           # both /dev/disk/by-uuid/${unlockUuid1} and findfs UUID=${unlockUuid1} work
           preOpenCommands = ''
             mkdir -m 0700 -p ${unlockDiskMountPoint}
@@ -94,7 +93,7 @@ in {
           '';
           fallbackToPassword = true; # causes "is implied by systemd stage 1." when `boot.initrd.systemd.enable`
         };
-      };
+      in lib.mapAttrs configureLuksDevice cfg.luksDevices;
     })
 
     # usb keyfile unlock with systemd initrd
