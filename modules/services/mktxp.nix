@@ -272,6 +272,13 @@ in
       # before it can start listening.
       path = [ pkgs.which ];
 
+      environment = {
+        # Python 3 buffers stdout when connected to a pipe (systemd journal).
+        # Without this, print/logging output is silently swallowed and never
+        # reaches journald even with verbose_mode = True.
+        PYTHONUNBUFFERED = "1";
+      };
+
       serviceConfig = {
         User = cfg.user;
         Group = cfg.group;
