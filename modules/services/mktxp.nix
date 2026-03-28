@@ -50,7 +50,12 @@ let
 
   # Plain Nix strings — host-portable, no store path context.
   # Exposed via _globalConfigText / _routerConfigText for eval tests.
-  globalConfText = toINI { MKTXP = cfg.settings; };
+  #
+  # compact_default_conf_values is always injected because mktxp's
+  # _config_entry_reader does an unguarded as_bool() on this key — it
+  # requires the key to be present in [MKTXP] and crashes with KeyError
+  # if it is absent.  Users can still override it via settings.
+  globalConfText = toINI { MKTXP = { compact_default_conf_values = false; } // cfg.settings; };
 
   routerConfText = toINI (
     { default = cfg.defaultRouterSettings.settings; }
