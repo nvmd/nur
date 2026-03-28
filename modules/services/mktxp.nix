@@ -266,6 +266,12 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
+      # mktxp's argument parser unconditionally calls `which nano/vi/vim` to
+      # detect the default editor, even when running `export`.  Without `which`
+      # in PATH the Popen call raises FileNotFoundError and the service crashes
+      # before it can start listening.
+      path = [ pkgs.which ];
+
       serviceConfig = {
         User = cfg.user;
         Group = cfg.group;
