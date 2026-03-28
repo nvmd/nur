@@ -51,6 +51,7 @@ let
   # Plain Nix strings — host-portable, no store path context.
   # Exposed via _globalConfigText / _routerConfigText for eval tests.
   #
+  # KeyError: 'compact_default_conf_values'
   # compact_default_conf_values is always injected because mktxp's
   # _config_entry_reader does an unguarded as_bool() on this key — it
   # requires the key to be present in [MKTXP] and crashes with KeyError
@@ -266,6 +267,7 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
 
+      # FileNotFoundError: 'which' crash
       # mktxp's argument parser unconditionally calls `which nano/vi/vim` to
       # detect the default editor, even when running `export`.  Without `which`
       # in PATH the Popen call raises FileNotFoundError and the service crashes
