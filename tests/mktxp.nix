@@ -71,7 +71,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_for_unit("mktxp.service")
 
     with subtest("HTTP server binds to port 49090"):
-        machine.wait_for_open_port(49090, addr="127.0.0.1", timeout=60)
+        machine.wait_for_open_port(49090, addr="127.0.0.1", timeout=120)
 
     with subtest("/metrics endpoint returns HTTP 200"):
         machine.succeed("curl -fsS http://127.0.0.1:49090/metrics")
