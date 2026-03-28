@@ -1,9 +1,10 @@
 # NixOS module for mktxp — Prometheus Exporter for MikroTik RouterOS devices
 # https://github.com/akpw/mktxp
 #
-# RFC-42 is followed: freeformType lets users pass any upstream option through
-# without this module needing to redeclare and maintain every known key.
-# Only the Nix-specific credentialsFile option is explicitly declared.
+# RFC-42 is followed: the INI-mapped settings use freeformType so users can
+# pass any upstream option through without this module redeclaring every known
+# key. Nix-specific options live at the outer routers.<name> level, while
+# routers.<name>.settings holds the freeform INI config.
 {
   config,
   lib,
@@ -16,7 +17,6 @@ let
   inherit (lib)
     literalExpression
     mapAttrs
-    mapAttrsToList
     mkEnableOption
     mkIf
     mkOption
@@ -26,10 +26,10 @@ let
     ;
 
   # ---------------------------------------------------------------------------
-  # INI generation helpers
+  # INI generation — Python-style literals required by configobj
   # ---------------------------------------------------------------------------
-  # mktxp uses configobj, which reads Python-style literals.
 
+  # mktxp uses configobj, which parses Python literals for booleans and None.
   toConfValue =
     v:
     if v == null then
@@ -43,86 +43,62 @@ let
     else
       toString v;
 
-  # Render an attrset as 4-space-indented INI key = value lines.
-  # Input values must be bool, int, str, or null.
-  renderSection =
-    attrs: lib.concatStringsSep "\n" (mapAttrsToList (k: v: "    ${k} = ${toConfValue v}") attrs);
+  # lib.generators.toINI with a custom mkKeyValue that emits Python literals.
+  toINI = lib.generators.toINI {
+    mkKeyValue = k: v: "${k} = ${toConfValue v}";
+  };
 
-  # Build the INI attrset for a router section.
-  # Strips the Nix-only credentialsFile and, when set, injects credentials_file.
-  routerToAttrs =
-    rcfg:
-    (builtins.removeAttrs rcfg [ "credentialsFile" ])
-    // optionalAttrs (rcfg.credentialsFile != null) {
-      credentials_file = toString rcfg.credentialsFile;
-    };
+  # Plain Nix strings — host-portable, no store path context.
+  # Exposed via _globalConfigText / _routerConfigText for eval tests.
+  globalConfText = toINI { MKTXP = cfg.settings; };
 
-  # Plain Nix strings for the generated configs.
-  # Exposed via _globalConfigText / _routerConfigText for host-portable testing
-  # (the pkgs.writeText calls below are target-system derivations; tests use
-  # the strings directly so they build on any host).
-  globalConfText = ''
-    [MKTXP]
-    ${renderSection cfg.settings}
-  '';
-
-  routerConfText = lib.concatStringsSep "\n\n" (
-    mapAttrsToList (name: attrs: "[${name}]\n${renderSection attrs}") (
-      { default = routerToAttrs cfg.defaultRouterSettings; } // mapAttrs (_: routerToAttrs) cfg.routers
-    )
+  routerConfText = toINI (
+    { default = cfg.defaultRouterSettings.settings; }
+    // mapAttrs (_: r: r.settings) cfg.routers
   );
 
-  # _mktxp.conf — global [MKTXP] settings
+  # Target-system store derivations — referenced by BindReadOnlyPaths.
   globalConf = pkgs.writeText "_mktxp.conf" globalConfText;
-
-  # mktxp.conf — [default] section followed by per-router sections
   routerConf = pkgs.writeText "mktxp.conf" routerConfText;
-
-  # Setup script body as a pure string (store paths stripped via
-  # unsafeDiscardStringContext) so eval tests can inspect it on any host
-  # without building target-system derivations.
-  setupScriptText = builtins.unsafeDiscardStringContext ''
-    ln -sf ${globalConf} /var/lib/mktxp/_mktxp.conf
-    ln -sf ${routerConf} /var/lib/mktxp/mktxp.conf
-  '';
 
   # ---------------------------------------------------------------------------
   # Router submodule type
   # ---------------------------------------------------------------------------
-  # credentialsFile is the only Nix-specific (non-INI) option.
-  # All other router settings are passed through via freeformType (RFC-42).
+  # The outer submodule is reserved for future Nix-specific options (analogous
+  # to how other NixOS modules add openFirewall, etc.). The inner settings
+  # submodule carries the RFC-42 freeformType that maps directly to INI keys.
+  # credentials_file and all other mktxp-native options live in .settings.
   routerSubmoduleType = types.submodule {
-    freeformType =
-      with types;
-      attrsOf (
-        nullOr (oneOf [
-          bool
-          int
-          str
-        ])
-      );
-
-    options = {
-      credentialsFile = mkOption {
-        type = types.nullOr types.path;
-        default = null;
-        description = ''
-          Path to a YAML file providing `username` and `password` for this router.
-          Takes precedence over the `username` and `password` keys set directly
-          in the router configuration. Intended for use with secret management
-          tools such as [sops-nix](https://github.com/Mic92/sops-nix) or
-          [agenix](https://github.com/ryantm/agenix).
-
-          The file must be readable by the service user
-          ({option}`services.mktxp.user`) and must be valid YAML:
-
-          ```yaml
-          username: monitoring
-          password: s3cr3t
-          ```
-        '';
-        example = literalExpression ''config.sops.secrets."mktxp/my-router".path'';
+    options.settings = mkOption {
+      type = types.submodule {
+        freeformType =
+          with types;
+          attrsOf (
+            nullOr (oneOf [
+              bool
+              int
+              str
+            ])
+          );
       };
+      default = { };
+      description = ''
+        Options written verbatim to the router's INI section. All keys map
+        directly to mktxp router configuration options; see the
+        [upstream documentation](https://github.com/akpw/mktxp#configuration)
+        for the full list.
+
+        To supply credentials via
+        [sops-nix](https://github.com/Mic92/sops-nix) or
+        [agenix](https://github.com/ryantm/agenix), set the
+        `credentials_file` key to the secret's runtime path:
+
+        ```nix
+        sops.secrets."mktxp/home-router".owner = config.services.mktxp.user;
+        services.mktxp.routers."home-router".settings.credentials_file =
+          config.sops.secrets."mktxp/home-router".path;
+        ```
+      '';
     };
   };
 in
@@ -179,12 +155,14 @@ in
       description = ''
         Default settings applied to every router unless overridden in
         {option}`services.mktxp.routers`. Written as the `[default]` section of
-        `mktxp.conf`. Keys map directly to mktxp router configuration options.
+        `mktxp.conf`.
 
-        ::: {.note}
-        Prefer per-router {option}`credentialsFile` entries over placing
-        credentials in shared defaults.
-        :::
+        ```nix
+        services.mktxp.defaultRouterSettings.settings = {
+          health = true;
+          bgp = false;
+        };
+        ```
       '';
     };
 
@@ -194,28 +172,19 @@ in
       description = ''
         Per-router configurations. Each attribute name becomes an INI section
         header in `mktxp.conf` (e.g. `routers."home-router"` → `[home-router]`).
-        Keys map directly to mktxp router configuration options and override
-        {option}`defaultRouterSettings` for that router.
-
-        To supply credentials via [sops-nix](https://github.com/Mic92/sops-nix) or
-        [agenix](https://github.com/ryantm/agenix):
-
-        ```nix
-        sops.secrets."mktxp/home-router".owner = config.services.mktxp.user;
-        services.mktxp.routers."home-router".credentialsFile =
-          config.sops.secrets."mktxp/home-router".path;
-        ```
+        Values in `.settings` override {option}`defaultRouterSettings.settings`
+        for that router.
       '';
       example = literalExpression ''
         {
-          "home-router" = {
-            credentialsFile = config.sops.secrets."mktxp/home-router".path;
+          "home-router".settings = {
+            credentials_file = config.sops.secrets."mktxp/home-router".path;
             hostname = "192.168.88.1";
             use_ssl = true;
             custom_labels = "site:home";
           };
-          "office-router" = {
-            credentialsFile = config.sops.secrets."mktxp/office-router".path;
+          "office-router".settings = {
+            credentials_file = config.sops.secrets."mktxp/office-router".path;
             hostname = "10.0.0.1";
             bgp = true;
             bfd = true;
@@ -246,18 +215,6 @@ in
       description = "INI text content of the generated `mktxp.conf`.";
     };
 
-    _setupScriptText = mkOption {
-      type = types.str;
-      internal = true;
-      readOnly = true;
-      default = setupScriptText;
-      description = ''
-        Body of the `ExecStartPre` symlink-setup script with store path references
-        stripped (`builtins.unsafeDiscardStringContext`). Suitable for verifying
-        the setup command pattern in host-portable eval tests.
-      '';
-    };
-
     _globalConfigFile = mkOption {
       type = types.path;
       internal = true;
@@ -281,12 +238,12 @@ in
         assertion = cfg.routers != { };
         message = ''
           services.mktxp.routers must define at least one router entry.
-          Add a router under services.mktxp.routers.<name>.
+          Add a router under services.mktxp.routers.<name>.settings.
         '';
       }
     ];
 
-    users.users = lib.optionalAttrs (cfg.user == "mktxp") {
+    users.users = optionalAttrs (cfg.user == "mktxp") {
       mktxp = {
         isSystemUser = true;
         group = cfg.group;
@@ -294,7 +251,7 @@ in
       };
     };
 
-    users.groups = lib.optionalAttrs (cfg.group == "mktxp") {
+    users.groups = optionalAttrs (cfg.group == "mktxp") {
       mktxp = { };
     };
 
@@ -308,22 +265,20 @@ in
         User = cfg.user;
         Group = cfg.group;
 
-        # mktxp writes runtime state (DHCP cache, etc.) alongside its config.
-        # We keep the Nix-generated configs immutable in the store and symlink
-        # them from the writable state directory. Updating a NixOS generation
-        # re-runs ExecStartPre, which updates the symlinks atomically.
+        # mktxp writes runtime state (DHCP cache, etc.) into its config
+        # directory. The Nix-generated configs live immutably in the store;
+        # BindReadOnlyPaths overlays them onto the mutable state directory so
+        # mktxp can read them but cannot modify or replace them (EROFS on any
+        # write attempt). systemd creates the target placeholders automatically
+        # if they do not yet exist.
         StateDirectory = "mktxp";
         StateDirectoryMode = "0700";
         WorkingDirectory = "/var/lib/mktxp";
 
-        ExecStartPre =
-          let
-            setupScript = pkgs.writeShellScript "mktxp-setup-config" ''
-              ln -sf ${globalConf} /var/lib/mktxp/_mktxp.conf
-              ln -sf ${routerConf} /var/lib/mktxp/mktxp.conf
-            '';
-          in
-          "${setupScript}";
+        BindReadOnlyPaths = [
+          "${globalConf}:/var/lib/mktxp/_mktxp.conf"
+          "${routerConf}:/var/lib/mktxp/mktxp.conf"
+        ];
 
         ExecStart = "${lib.getExe cfg.package} --cfg-dir /var/lib/mktxp export";
 
@@ -335,7 +290,8 @@ in
         NoNewPrivileges = true;
         PrivateTmp = true;
         PrivateDevices = true;
-        # ProtectSystem=strict: systemd automatically keeps StateDirectory writable.
+        # ProtectSystem=strict: systemd keeps StateDirectory writable while
+        # BindReadOnlyPaths enforces immutability on the two config files.
         ProtectSystem = "strict";
         ProtectHome = true;
         ProtectHostname = true;
