@@ -81,11 +81,23 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -f /var/lib/mktxp/mktxp.conf")
 
     with subtest("[test-router] section is present in generated config"):
-        machine.succeed("grep -q '\\[test-router\\]' /var/lib/mktxp/mktxp.conf")
+        # BindReadOnlyPaths are only visible inside the service's private mount
+        # namespace (created by ProtectSystem=strict).  Access via /proc/PID/root
+        # follows the service's namespace and sees the Nix-store bind mount.
+        machine.succeed(
+            "PID=$(systemctl show mktxp.service --property=MainPID --value) && "
+            "grep -q '\\[test-router\\]' /proc/$PID/root/var/lib/mktxp/mktxp.conf"
+        )
 
     with subtest("[MKTXP] section reflects NixOS option values"):
-        machine.succeed("grep -q 'listen = 127.0.0.1:49090' /var/lib/mktxp/_mktxp.conf")
-        machine.succeed("grep -q 'verbose_mode = True' /var/lib/mktxp/_mktxp.conf")
+        machine.succeed(
+            "PID=$(systemctl show mktxp.service --property=MainPID --value) && "
+            "grep -q 'listen = 127.0.0.1:49090' /proc/$PID/root/var/lib/mktxp/_mktxp.conf"
+        )
+        machine.succeed(
+            "PID=$(systemctl show mktxp.service --property=MainPID --value) && "
+            "grep -q 'verbose_mode = True' /proc/$PID/root/var/lib/mktxp/_mktxp.conf"
+        )
 
     with subtest("service is running under the dedicated mktxp user"):
         machine.succeed("systemctl show mktxp.service --property=User | grep -q 'User=mktxp'")
