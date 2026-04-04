@@ -52,8 +52,13 @@
         lib.mapAttrs' (n: v: lib.nameValuePair "mktxp-eval-${n}" v) evalTests
         // lib.mapAttrs' (n: v: lib.nameValuePair "initrd-pkcs11-eval-${n}" v) initrdPkcs11EvalTests
         // lib.optionalAttrs pkgs.stdenv.isLinux {
-          # Full NixOS VM integration test — Linux builders only.
+          # Full NixOS VM integration tests — Linux builders only.
           mktxp = import ./tests/mktxp.nix { inherit pkgs self; };
+          # Single-boot: enroll + attach (no reboot, no UEFI boot loader).
+          initrd-pkcs11 = import ./tests/initrd-pkcs11.nix { inherit pkgs self; };
+          # Full boot-cycle: enroll → reboot → initrd unlocks LUKS.
+          # Requires KVM; very slow or hangs under pure TCG emulation.
+          initrd-pkcs11-boot = import ./tests/initrd-pkcs11-boot.nix { inherit pkgs self; };
         }
       );
     };

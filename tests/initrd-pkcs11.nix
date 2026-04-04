@@ -1,0 +1,146 @@
+# VM integration test for the initrd-pkcs11 NixOS module.
+#
+# Uses softhsm as a software PKCS#11 token to test the p11-kit → PKCS#11
+# module → libcryptsetup-token-systemd-pkcs11.so chain.
+#
+# NOTE: This does NOT test the pcscd/CCID/USB stack (softhsm is a pure
+# software token that doesn't need pcscd).  Testing the full pcscd chain
+# would require a virtual smartcard (e.g. vsmartcard-vpcd) or real hardware.
+#
+# This test does NOT use useBootLoader/specialisation/reboot (which requires
+# a UEFI disk image builder that is very slow without KVM).  Instead it
+# tests enrollment + unlock within a single boot using systemd-cryptsetup
+# directly.
+{ pkgs, self }:
+let
+  lib = pkgs.lib;
+  softhsmModule = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
+
+  tokenDir = "/var/lib/softhsm/tokens";
+
+  softhsmConf = pkgs.writeText "softhsm2.conf" ''
+    directories.tokendir = ${tokenDir}
+    objectstore.backend = file
+  '';
+
+  # Pre-create softhsm token with an RSA key pair and self-signed X.509
+  # certificate at Nix build time.  systemd-cryptenroll requires a
+  # CKO_CERTIFICATE object on the token.
+  testTokenData = pkgs.runCommand "softhsm-test-token" {
+    nativeBuildInputs = with pkgs; [
+      softhsm
+      opensc # pkcs11-tool
+      openssl
+    ];
+  } ''
+    mkdir -p $out
+
+    export SOFTHSM2_CONF=$TMPDIR/softhsm2.conf
+    cat > $SOFTHSM2_CONF <<EOF
+    directories.tokendir = $out
+    objectstore.backend = file
+    EOF
+
+    # Generate RSA 2048 key pair + self-signed certificate
+    openssl genrsa -out $TMPDIR/key.pem 2048 2>/dev/null
+    openssl req -new -x509 -key $TMPDIR/key.pem -out $TMPDIR/cert.pem \
+      -days 365 -subj "/CN=test-luks-pkcs11" 2>/dev/null
+    openssl x509 -in $TMPDIR/cert.pem -outform DER -out $TMPDIR/cert.der
+
+    # Initialise softhsm token (PIN=1234, SO-PIN=12345678)
+    softhsm2-util --init-token --free \
+      --label test --so-pin 12345678 --pin 1234
+
+    # Import private key into the token
+    softhsm2-util --import $TMPDIR/key.pem \
+      --token test --pin 1234 --label luks-key --id 01
+
+    # Import the matching certificate (needed by systemd-cryptenroll)
+    pkcs11-tool --module ${softhsmModule} \
+      --token-label test --login --pin 1234 \
+      --write-object $TMPDIR/cert.der --type cert --label luks-key --id 01
+  '';
+
+  # PKCS#11 URI with embedded PIN for non-interactive operation.
+  pkcs11Uri = "pkcs11:token=test;pin-value=1234";
+in
+pkgs.testers.runNixOSTest {
+  name = "initrd-pkcs11-softhsm";
+
+  nodes.machine =
+    { config, pkgs, ... }:
+    {
+      imports = [ self.nixosModules.initrd-pkcs11 ];
+
+      virtualisation.emptyDiskImages = [ 512 ];
+
+      boot.initrd.systemd.enable = true;
+
+      # Enable the module (for store paths / p11-kit config in initrd)
+      boot.initrd.systemd.pkcs11 = {
+        enable = true;
+        modules = {
+          softhsm = softhsmModule;
+        };
+      };
+
+      environment.systemPackages = with pkgs; [
+        cryptsetup
+        softhsm
+        opensc
+      ];
+
+      # softhsm config + p11-kit module registration on running system
+      environment.etc."softhsm2.conf".source = softhsmConf;
+      environment.etc."pkcs11/modules/softhsm.module".text = ''
+        module: ${softhsmModule}
+      '';
+    };
+
+  testScript = ''
+    machine.wait_for_unit("multi-user.target")
+
+    # --- Set up softhsm token data ---
+    machine.succeed("mkdir -p ${tokenDir}")
+    machine.succeed("cp -r ${testTokenData}/* ${tokenDir}/")
+    machine.succeed("export SOFTHSM2_CONF=/etc/softhsm2.conf && softhsm2-util --show-slots | grep -q 'test'")
+
+    # --- Create LUKS2 volume ---
+    machine.succeed(
+      "echo -n supersecret | cryptsetup luksFormat -q --iter-time=1 /dev/vdb -"
+    )
+
+    # --- Enroll softhsm PKCS#11 token ---
+    machine.succeed(
+      "SOFTHSM2_CONF=/etc/softhsm2.conf "
+      "PASSWORD=supersecret "
+      "SYSTEMD_LOG_LEVEL=debug "
+      "systemd-cryptenroll "
+      "--pkcs11-token-uri='${pkcs11Uri}' "
+      "/dev/vdb "
+      "|& systemd-cat"
+    )
+
+    # --- Verify enrollment ---
+    machine.succeed("cryptsetup luksDump /dev/vdb | grep -q systemd-pkcs11")
+
+    # --- Test unlock via systemd-cryptsetup ---
+    machine.succeed(
+      "SOFTHSM2_CONF=/etc/softhsm2.conf "
+      "systemd-cryptsetup attach test-crypt /dev/vdb - 'pkcs11-uri=${pkcs11Uri}'"
+    )
+
+    # --- Verify the volume is open ---
+    machine.succeed("test -b /dev/mapper/test-crypt")
+
+    # --- Create filesystem and verify mount ---
+    machine.succeed("mkfs.ext4 -q /dev/mapper/test-crypt")
+    machine.succeed("mkdir -p /mnt/test && mount /dev/mapper/test-crypt /mnt/test")
+    machine.succeed("echo 'pkcs11-test-ok' > /mnt/test/marker")
+    machine.succeed("grep -q 'pkcs11-test-ok' /mnt/test/marker")
+
+    # --- Clean up ---
+    machine.succeed("umount /mnt/test")
+    machine.succeed("cryptsetup close test-crypt")
+  '';
+}
