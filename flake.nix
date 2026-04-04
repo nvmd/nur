@@ -41,9 +41,16 @@
             nixpkgsLib = nixpkgs.lib;
             mktxpModule = self.nixosModules.mktxp;
           };
+
+          initrdPkcs11EvalTests = import ./tests/initrd-pkcs11-eval.nix {
+            inherit pkgs;
+            nixpkgsLib = nixpkgs.lib;
+            initrdPkcs11Module = self.nixosModules.initrd-pkcs11;
+          };
         in
         # Prefix every eval-test name for easy identification.
         lib.mapAttrs' (n: v: lib.nameValuePair "mktxp-eval-${n}" v) evalTests
+        // lib.mapAttrs' (n: v: lib.nameValuePair "initrd-pkcs11-eval-${n}" v) initrdPkcs11EvalTests
         // lib.optionalAttrs pkgs.stdenv.isLinux {
           # Full NixOS VM integration test — Linux builders only.
           mktxp = import ./tests/mktxp.nix { inherit pkgs self; };
