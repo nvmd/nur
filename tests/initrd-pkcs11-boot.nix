@@ -22,7 +22,7 @@
 # https://github.com/NixOS/nixpkgs/blob/nixos-unstable/nixos/tests/systemd-initrd-luks-tpm2.nix
 # https://github.com/NixOS/nixpkgs/commit/b13891782fdec1b72e1e9ab4f86fce1638f20203
 
-{ pkgs, self }:
+{ pkgs, self, ... }:
 let
   tokenDir = "/var/lib/softhsm/tokens";
 
@@ -84,6 +84,14 @@ pkgs.testers.runNixOSTest {
         directories.tokendir = ${tokenDir}
         objectstore.backend = file
       '';
+
+      # Script to copy read-only token data from the initrd to a
+      # writable tmpfs location.  Uses /bin/ paths provided by extraBin.
+      copySofthsmTokens = pkgs.writeShellScript "copy-softhsm-tokens" ''
+        /bin/mkdir -p ${tokenDir}
+        /bin/cp -a /var/lib/softhsm/tokens-ro/* ${tokenDir}/
+        /bin/chmod -R u+w ${tokenDir}
+      '';
     in
     {
       virtualisation = {
@@ -119,7 +127,7 @@ pkgs.testers.runNixOSTest {
             device = "/dev/vdb";
             crypttabExtraOpts = [
               "pkcs11-uri=auto"
-              "token-timeout=60"
+              "token-timeout=10"
             ];
           };
         };
@@ -130,17 +138,51 @@ pkgs.testers.runNixOSTest {
         # needed because softhsm requires filesystem-based token data
         # and a config file, while a YubiKey carries its keys in hardware.)
 
-        # Softhsm config + pre-built token data in initrd
+        # Softhsm config + pre-built token data in initrd.
+        # Token data is stored at a read-only path; a oneshot service
+        # copies it to a writable location before cryptsetup runs
+        # (softhsm needs write access for internal lock files).
         boot.initrd.systemd.contents = {
           "/etc/softhsm2.conf".source = softhsmConf;
-          "${tokenDir}".source = testTokenData;
+          "/var/lib/softhsm/tokens-ro".source = testTokenData;
         };
 
-        # Set SOFTHSM2_CONF for all initrd services including
+        # The copy script + coreutils must be explicitly in storePaths
+        # because make-initrd-ng does not follow Nix store references
+        # in shell scripts.
+        boot.initrd.systemd.storePaths = [ copySofthsmTokens ];
+
+        boot.initrd.systemd.extraBin = {
+          mkdir = "${pkgs.coreutils}/bin/mkdir";
+          cp = "${pkgs.coreutils}/bin/cp";
+          chmod = "${pkgs.coreutils}/bin/chmod";
+        };
+
+        # Copy read-only token data to a writable location before
+        # cryptsetup runs.  Following the clevis pattern: wantedBy the
+        # specific cryptsetup service, ordered Before it, and
+        # DefaultDependencies=no to avoid the sysinit.target deadlock.
+        boot.initrd.systemd.services.softhsm-copy-tokens = {
+          description = "Copy softhsm tokens to writable tmpfs";
+          wantedBy = [ "systemd-cryptsetup@cryptroot.service" ];
+          before = [
+            "systemd-cryptsetup@cryptroot.service"
+            "cryptsetup-pre.target"
+          ];
+          unitConfig.DefaultDependencies = false;
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStart = "${copySofthsmTokens}";
+          };
+        };
+
+        # Set SOFTHSM2_CONF + PIN for all initrd services including
         # generator-spawned systemd-cryptsetup@.
-        # (Not needed for pcscd-based tokens like YubiKey.)
+        # PIN is required because systemd's pkcs11_token_login() reads
+        # the token PIN from $PIN env var, not from the URI.
+        # (Not needed for pcscd-based tokens like YubiKey with interactive PIN.)
         boot.initrd.systemd.settings.Manager.DefaultEnvironment =
-          lib.mkForce "PATH=/bin:/sbin SOFTHSM2_CONF=/etc/softhsm2.conf";
+          lib.mkForce "PATH=/bin:/sbin SOFTHSM2_CONF=/etc/softhsm2.conf PIN=1234";
 
       };
     };
@@ -182,7 +224,9 @@ pkgs.testers.runNixOSTest {
     machine.crash()
 
     # --- Second boot: verify LUKS unlocked via softhsm PKCS#11 ---
-    machine.wait_for_unit("multi-user.target")
+    # If the PKCS#11 token isn't found, systemd-cryptsetup falls back to
+    # a passphrase prompt that hangs forever — the 120s timeout catches this.
+    machine.wait_for_unit("multi-user.target", timeout=120)
     assert "/dev/mapper/cryptroot on / type ext4" in machine.succeed("mount")
   '';
 }
