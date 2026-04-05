@@ -108,6 +108,8 @@ PKCS#11 needs everything TPM2 needs, plus:
 
 Note: unlike clevis (which produces a key file for a *specific* `systemd-cryptsetup@<name>.service`), pcscd is a shared daemon needed by *all* PKCS#11 LUKS volumes. `cryptsetup-pre.target` is the correct anchor because the cryptsetup generator orders it `Before=` all cryptsetup services.
 
+**Future exploration: per-device activation (clevis approach).** Currently pcscd and all PKCS#11 initrd infrastructure starts unconditionally when `boot.initrd.systemd.pkcs11.enable = true`, even if no LUKS volume actually uses PKCS#11 unlock. Clevis avoids this by targeting specific `systemd-cryptsetup@<name>.service` units. We could follow a similar approach: inspect `crypttabExtraOpts` for PKCS#11-related options (e.g. `pkcs11-uri=`) and only wire up pcscd/storePaths/contents for volumes that actually need it. Taken further, if no volume needs PKCS#11, the module could become a no-op — saving initrd size and boot time. Trade-off: this adds implementation complexity (introspecting crypttab config at module eval time) and may not be worth it until the module is fully working with real hardware. Explore once the core module is validated end-to-end.
+
 **Why NixOS `sockets` option, not raw `units`:** In NixOS initrd, raw `[Install] WantedBy=` in unit text is informational only — it requires `systemctl enable` to create symlinks, which never happens during image assembly. The NixOS `boot.initrd.systemd.sockets` option (`nixos/modules/system/boot/systemd/initrd.nix:367-379`) creates proper `.wants/` symlinks declaratively at build time via `generateUnits`.
 
 ### pcscd clean shutdown: `conflicts` + `before` shutdown/switch-root targets
