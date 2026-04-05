@@ -1,64 +1,65 @@
 # NixOS LUKS Unlock via PIV Smartcard (YubiKey) in Initrd
 
-## Summary & Implementation Plan for Claude Code
-
-**Date:** 2026-04-04
-**Goal:** Enable LUKS partition unlock at boot using a YubiKey PIV applet (PKCS#11) on NixOS with systemd-based initrd. Deliver as a reusable NixOS module, targeting NUR for publication.
+**Goal:** Enable LUKS partition unlock at boot using a YubiKey PIV applet (PKCS#11) on NixOS with systemd-based initrd. Delivered as a reusable NixOS module in NUR.
 
 ---
 
 ## 1. Current Status
 
-### What Has Been Accomplished
+### Implemented
 
-- **PKCS#11 enrollment works.** Using `systemd-cryptenroll --pkcs11-token-uri=auto`, a YubiKey PIV slot with an ECCP384 key has been successfully enrolled into a LUKS2 partition. The enrolled token appears in `cryptsetup luksDump` output. A passphrase slot is retained as fallback.
+- **NixOS module** at `modules/boot/initrd-pkcs11.nix` providing `boot.initrd.systemd.pkcs11.{enable, modules, pcscd.plugins}`.
+- **Single-boot VM test passes** (`tests/initrd-pkcs11.nix`): enroll + attach via softhsm, ~18s on aarch64-darwin/TCG.
+- **Boot-cycle VM test passes** (`tests/initrd-pkcs11-boot.nix`): enroll → reboot → initrd unlocks LUKS via softhsm PKCS#11 token. ~53s on aarch64-darwin under TCG (no KVM needed).
+- **Eval tests** (`tests/initrd-pkcs11-eval.nix`): 8 test groups covering module option validation.
 
-- **NixOS module implemented.** `modules/boot/initrd-pkcs11.nix` provides `boot.initrd.systemd.pkcs11.{enable, modules, pcscd.plugins}` options. It configures pcscd socket/service, p11-kit module files, and storePaths in the initrd.
+### Not Done
 
-- **Single-boot VM integration test passes.** `tests/initrd-pkcs11.nix` tests the full enroll + attach chain using softhsm as a software PKCS#11 token. Runs on aarch64-darwin (QEMU/TCG) in ~18s. Covers: token setup → LUKS format → PKCS#11 enrollment → PKCS#11 unlock → filesystem mount/verify.
+- Real YubiKey hardware testing not done (softhsm tests bypass the pcscd/CCID/USB stack).
+- Not upstreamed to nixpkgs.
 
-- **Boot-cycle VM test written but untested.** `tests/initrd-pkcs11-boot.nix` tests the full reboot flow (enroll on first boot → reboot into specialisation → initrd unlocks LUKS via PKCS#11). Requires KVM; not yet run.
+---
 
-- **Eval tests exist.** `tests/initrd-pkcs11-eval.nix` provides pure Nix evaluation tests for module option validation.
+## 2. The Runtime Dependency Chain
 
-- **The boot unlock does NOT work yet on real hardware.** The module and tests use softhsm. Real YubiKey testing requires physical hardware and has not been done.
-
-### Key Research Findings
-
-#### 1.1 The Dependency Chain
-
-The full runtime dependency chain for PIV-based LUKS unlock is:
+The full chain for PIV-based LUKS unlock, with the nixpkgs package providing each component:
 
 ```
 systemd-cryptsetup (in initrd)
-  → libcryptsetup-token-systemd-pkcs11.so  (cryptsetup token plugin, ships with systemd)
-    → libp11-kit.so  (PKCS#11 module discovery/dispatch)
-      → /etc/pkcs11/modules/ykcs11.module  (config file pointing to libykcs11)
-        → libykcs11.so  (Yubico's PKCS#11 module, from yubico-piv-tool)
-          → libykpiv.so  (Yubico PIV library, dependency of libykcs11)
-            → libpcsclite.so  (PC/SC client library)
-              → pcscd  (PC/SC Smart Card Daemon)
-                → ccid driver  (USB CCID smart card reader driver, loaded by pcscd)
+  → libcryptsetup-token-systemd-pkcs11.so  (ships with systemd package)
+    → libp11-kit.so  (pkgs.p11-kit — PKCS#11 module discovery/dispatch)
+      → /etc/pkcs11/modules/<name>.module  (config file, injected via initrd contents)
+        → libykcs11.so  (pkgs.yubico-piv-tool — YubiKey's PKCS#11 implementation)
+          → libykpiv.so  (pkgs.yubico-piv-tool — YubiKey PIV library)
+            → libpcsclite.so  (pkgs.pcsclite — PC/SC client library)
+              → pcscd  (pkgs.pcsclite — PC/SC Smart Card Daemon)
+                → ccid driver  (pkgs.ccid — USB CCID reader driver, userspace)
                   → YubiKey hardware (USB)
 ```
 
-Both `p11-kit` and `pcscd` are required at runtime in the initrd. This was confirmed by researching:
-- dracut's `91pkcs11` module (handles p11-kit layer only, not pcscd — because pcscd is handled separately)
-- The Nitrokey/Gentoo guide (vtimofeenko.com) which documents the full chain
-- systemd source code behavior: `systemd-cryptsetup` uses `libcryptsetup-token-systemd-pkcs11.so` which calls p11-kit, which dispatches to the configured PKCS#11 module (libykcs11 for YubiKey PIV), which talks to pcscd
+This chain was confirmed by cross-referencing:
+- **dracut's `91pkcs11` module** ([commit 83ea8cf](https://github.com/dracutdevs/dracut/commit/83ea8cf)) — handles p11-kit layer; pcscd is handled separately
+- **Nitrokey/Gentoo guide** (https://vtimofeenko.com/posts/unlocking-luks2-with-x509-nitrokey-during-boot/) — documents the full chain for a non-NixOS system
+- **systemd source code** — `systemd-cryptsetup` loads `libcryptsetup-token-systemd-pkcs11.so` which calls p11-kit, which dispatches to the configured PKCS#11 module
 
-#### 1.2 The pcscd Ordering Problem
+### What Is Automatically Resolved vs What Needs Explicit Configuration
 
-This is a known issue across distros (not NixOS-specific):
+**`make-initrd-ng`** (the Rust tool at `pkgs/build-support/kernel/make-initrd-ng/src/main.rs`) automatically follows:
+- **ELF `DT_NEEDED` entries** (lines 142-146): direct shared library dependencies are parsed via `goblin` crate
+- **RPATH/RUNPATH** (lines 128-140): RUNPATH takes precedence over RPATH per ELF spec; paths are searched for each needed library
+- **systemd's `.note.dlopen` metadata** (lines 100-126): JSON-encoded notes listing libraries to be dlopen'd, filtered by priority and feature flags
 
-- `pcscd` is socket-activated by default. The `pcscd.socket` unit is pulled in by `sockets.target`.
-- In the initrd, `sockets.target` runs *after* `cryptsetup.target` in the dependency graph.
-- This creates a deadlock: `systemd-cryptsetup` needs pcscd to talk to the YubiKey, but pcscd won't start until after cryptsetup finishes.
-- **Fix:** Override `pcscd.socket` and `pcscd.service` with `DefaultDependencies=no` and `WantedBy=cryptsetup-pre.target`, so they start *before* cryptsetup attempts to open volumes.
+**NOT automatically resolved:** Libraries loaded via plain `dlopen()` at runtime without `.note.dlopen` annotations. This is the case for p11-kit loading PKCS#11 modules — p11-kit reads module paths from `/etc/pkcs11/modules/*.module` config files and dlopen's them at runtime.
 
-#### 1.3 How NixOS Handles TPM2 (The Reference Pattern)
+**Impact on module design:** Adding `libcryptsetup-token-systemd-pkcs11.so` to `storePaths` does NOT automatically pull in `libp11-kit.so.0`. Despite the original assumption that it would be a direct ELF dependency, `libcryptsetup-token-systemd-pkcs11.so` actually loads `libp11-kit.so.0` via `dlopen()` at runtime (confirmed by the boot test — see §8). `libp11-kit.so.0` **must be listed explicitly in `storePaths`**. Additionally, `libykcs11.so` (or any PKCS#11 module) must be listed explicitly in `storePaths`, and its `/etc/pkcs11/modules/` config file must be injected via `contents`.
 
-In `nixos/modules/system/boot/luksroot.nix`, TPM2 support is wired as follows:
+---
+
+## 3. How NixOS Handles TPM2 (The Reference Pattern)
+
+The TPM2 LUKS unlock in nixpkgs is the closest reference for PKCS#11 support. Key differences: TPM2 needs no userspace daemon (uses kernel's `/dev/tpmrm0`), making it much simpler.
+
+### storePaths in luksroot.nix (lines 1225-1231)
 
 ```nix
 boot.initrd.systemd.storePaths = [
@@ -70,645 +71,92 @@ boot.initrd.systemd.storePaths = [
 ];
 ```
 
-Key observations:
-- The `boot.initrd.systemd.tpm2.enable` option simply adds the `.so` plugin to `storePaths`.
-- TPM2 needs no userspace daemon (it uses the kernel's `/dev/tpmrm0` interface), so it's much simpler than PKCS#11.
-- FIDO2 has no dedicated NixOS module either — it works via `crypttabExtraOpts = ["fido2-device=auto"]` and relies on systemd's built-in FIDO2 support (which also doesn't need pcscd).
+The pattern: `boot.initrd.systemd.tpm2.enable` adds the `.so` plugin to `storePaths`. NixOS wraps `systemd-cryptsetup`/`systemd-cryptenroll` to set `LD_LIBRARY_PATH` to systemd's `lib/cryptsetup/` dir (via `nixos/modules/system/boot/luksroot.nix`), so token plugins are found automatically if present in initrd store paths.
 
-#### 1.4 NixOS-Specific Wrapping
+### crypttabExtraOpts flow (luksroot.nix, lines 590-611)
 
-NixOS patches `cryptsetup` and wraps `systemd-cryptsetup` / `systemd-cryptenroll` to set `LD_LIBRARY_PATH` pointing to systemd's `lib/cryptsetup/` directory. This means the `libcryptsetup-token-systemd-pkcs11.so` plugin is found automatically **if it exists in the initrd store paths** — the wrapping is already handled.
+User-provided `crypttabExtraOpts` (e.g. `["pkcs11-uri=auto" "token-timeout=60"]`) are placed first in the options list when generating `/etc/crypttab`. The generated crypttab is installed at line 1216 via `contents."/etc/crypttab".source = stage1Crypttab`.
 
-#### 1.5 What Does NOT Exist Today
+### TPM2 test pattern (nixos/tests/systemd-initrd-luks-tpm2.nix)
 
-- No `boot.initrd.systemd.pkcs11.enable` option in nixpkgs.
-- No NixOS module that adds pcscd to the initrd.
-- No NixOS integration test for PKCS#11 initrd LUKS unlock (tests exist for TPM2 and FIDO2).
-- nixpkgs issue #265366 confirms that vanilla `cryptsetup` cannot use systemd's token plugins (FIDO2, PKCS#11, TPM2) outside of `systemd-cryptsetup` due to library path issues. The initrd's `systemd-cryptsetup` wrapper handles this, but only if the `.so` files are in the store paths.
+```
+1. First boot: create LUKS volume → enroll TPM2 via systemd-cryptenroll
+2. bootctl set-default to specialisation → crash (reboot)
+3. Second boot: systemd-cryptsetup in initrd reads crypttab → loads TPM2 plugin → unseals passphrase
+4. Verify /dev/mapper/cryptroot mounted as /
+```
+
+Uses `useBootLoader = true`, `useEFIBoot = true`, `efi.OVMF = pkgs.OVMFFull` (OVMFFull contains TCG support), `virtualisation.tpm.enable = true`, and the specialisation pattern with `lib.mkVMOverride`.
+
+### What PKCS#11 adds on top of TPM2
+
+PKCS#11 needs everything TPM2 needs, plus:
+1. **pcscd daemon** with correct ordering before `cryptsetup-pre.target`
+2. **CCID drivers** discoverable via `PCSCLITE_HP_DROPDIR`
+3. **p11-kit module config files** in `/etc/pkcs11/modules/`
+4. **USB kernel modules** for smartcard reader enumeration
 
 ---
 
-## 2. Additional Research Steps (For Claude Code)
+## 4. Design Decisions and Their Basis
 
-These should be done with direct access to the nixpkgs tree and NUR:
+### pcscd ordering: `wantedBy cryptsetup-pre.target` with `DefaultDependencies=false`
 
-### 2.1 Source Code Analysis (Priority: High)
+**Problem:** pcscd is socket-activated by default. `pcscd.socket` is pulled in by `sockets.target`, which runs *after* `cryptsetup.target` in the default dependency graph. This creates a deadlock: `systemd-cryptsetup` needs pcscd, but pcscd won't start until after cryptsetup finishes.
 
-Read and understand these files in the nixpkgs tree:
+**Decision:** Override both `pcscd.socket` and `pcscd.service` with `DefaultDependencies=no` (avoids implicit `After=sysinit.target`) and `wantedBy = [ "cryptsetup-pre.target" ]` so they start *before* cryptsetup attempts to open volumes.
 
-1. **`nixos/modules/system/boot/luksroot.nix`** — The primary file. Understand:
-   - How `storePaths` is populated for `systemd-cryptsetup` and the TPM2 plugin
-   - How `crypttabExtraOpts` flows into the generated crypttab
-   - The assertions and guards for systemd stage 1
-   - The `stage1Crypttab` generation logic
+Note: unlike clevis (which produces a key file for a *specific* `systemd-cryptsetup@<name>.service`), pcscd is a shared daemon needed by *all* PKCS#11 LUKS volumes. `cryptsetup-pre.target` is the correct anchor because the cryptsetup generator orders it `Before=` all cryptsetup services.
 
-2. **`nixos/modules/system/boot/systemd/initrd.nix`** — Understand:
-   - How `boot.initrd.systemd.storePaths` works (does it follow Nix store closures automatically, or do transitive `.so` deps need explicit listing?)
-   - How `boot.initrd.systemd.contents` works for injecting config files
-   - How `boot.initrd.systemd.services` works for adding custom services
-   - How `boot.initrd.systemd.initrdBin` works vs. `storePaths`
+**Why NixOS `sockets` option, not raw `units`:** In NixOS initrd, raw `[Install] WantedBy=` in unit text is informational only — it requires `systemctl enable` to create symlinks, which never happens during image assembly. The NixOS `boot.initrd.systemd.sockets` option (`nixos/modules/system/boot/systemd/initrd.nix:367-379`) creates proper `.wants/` symlinks declaratively at build time via `generateUnits`.
 
-3. **`nixos/modules/services/hardware/pcscd.nix`** — The existing pcscd module for the running system. Understand:
-   - How it references `pkgs.pcsclite`, `pkgs.ccid`
-   - The systemd unit configuration it generates
-   - How the CCID driver path (`${pkgs.ccid}/lib/pcsc/drivers`) is configured for pcscd
+### pcscd clean shutdown: `conflicts` + `before` shutdown/switch-root targets
 
-4. **`pkgs/tools/security/yubico-piv-tool/`** — Check:
-   - That `libykcs11.so` is built and available in the output
-   - What its runtime dependencies are (should be `libykpiv.so`, `libpcsclite.so`, `libcrypto.so`)
+**Learned from:** The initrd-ssh module (`initrd-ssh.nix`) uses `before = [ "shutdown.target" ]` + `conflicts = [ "shutdown.target" ]`. The clevis implementation in `luksroot.nix` adds `before` and `conflicts` for both `initrd-switch-root.target` and `shutdown.target`. Both patterns ensure daemons are terminated cleanly before the initrd transitions to the real root filesystem.
 
-5. **`nixos/tests/systemd-initrd-luks-tpm2.nix`** (or similar test file) — Reference pattern for writing a PKCS#11 integration test.
+**Applied to pcscd:** Added `Requires=pcscd.socket` (matching the upstream unit shipped by pcsclite — not strictly required in the initrd since the socket is always started via `wantedBy`, but kept to stay consistent with upstream), and `before` + `conflicts` for `initrd-switch-root.target` and `shutdown.target`, ensuring clean daemon termination before switch-root.
 
-### 2.2 Dependency Verification (Priority: High)
+### CCID driver discovery via `PCSCLITE_HP_DROPDIR`
 
-Run these checks to confirm the exact store paths and transitive dependencies:
+**Source:** `pkgs/by-name/pc/pcsclite/package.nix:49` — compile-time `usbdropdir` is set to `/var/lib/pcsc/drivers`, a non-existent path in NixOS.
 
-```bash
-# Check what libykcs11 links against
-nix-shell -p yubico-piv-tool --run "ldd $(nix eval --raw nixpkgs#yubico-piv-tool)/lib/libykcs11.so"
-
-# Check the pkcs11 token plugin's dependencies
-nix-shell -p systemd --run "ldd $(nix eval --raw nixpkgs#systemd)/lib/cryptsetup/libcryptsetup-token-systemd-pkcs11.so"
-
-# Confirm p11-kit module directory location
-nix-shell -p p11-kit --run "ls $(nix eval --raw nixpkgs#p11-kit)/etc/pkcs11/modules/ 2>/dev/null || echo 'no default modules dir'"
-
-# Check if store closure of libcryptsetup-token-systemd-pkcs11.so already pulls in p11-kit
-nix path-info -r $(nix eval --raw nixpkgs#systemd)/lib/cryptsetup/libcryptsetup-token-systemd-pkcs11.so 2>/dev/null
-```
-
-### 2.3 Verify pcscd Requirements in Initrd (Priority: Medium)
-
-- Determine whether pcscd needs a config file (`/etc/reader.conf.d/` or similar) or if it auto-detects CCID readers.
-- Check if pcscd needs the full `${pkgs.ccid}/lib/pcsc/drivers` directory tree or just specific `.bundle` directories.
-- Determine if USB kernel modules (`usbhid`, etc.) need to be explicitly added to `boot.initrd.availableKernelModules` beyond what's already typically present.
-
-### 2.4 Check Existing Community Work (Priority: Medium)
-
-Search for:
-- Any NUR packages or modules that already attempt PKCS#11 initrd support
-- Any open nixpkgs PRs adding `boot.initrd.systemd.pkcs11`
-- Any NixOS Discourse / GitHub discussions with working configs
-
----
-
-## 3. Implementation Steps
-
-### Phase 1: Minimal Working Configuration (Manual Wiring)
-
-Before building a proper module, get it working as a raw NixOS config to validate the approach.
-
-#### 3.1 Draft Configuration
-
+**Reference pattern:** `nixos/modules/services/hardware/pcscd.nix:15-18` builds a `pluginEnv` from plugin packages:
 ```nix
-{ config, pkgs, lib, ... }:
-
-{
-  # PREREQUISITE: systemd-based initrd
-  boot.initrd.systemd.enable = true;
-
-  # --- LUKS device with PKCS#11 ---
-  boot.initrd.luks.devices."cryptroot" = {
-    device = "/dev/disk/by-uuid/<UUID>";
-    crypttabExtraOpts = [
-      "pkcs11-uri=pkcs11:"    # bare URI = try any available PKCS#11 token
-      "token-timeout=10"      # seconds to wait for token before passphrase fallback
-    ];
-  };
-
-  # --- Store paths needed in initrd ---
-  boot.initrd.systemd.storePaths = [
-    # The PKCS#11 token plugin (same pattern as TPM2)
-    "${config.boot.initrd.systemd.package}/lib/cryptsetup/libcryptsetup-token-systemd-pkcs11.so"
-
-    # p11-kit (used by the plugin to discover PKCS#11 modules)
-    "${pkgs.p11-kit}/lib/libp11-kit.so.0"
-
-    # YubiKey PKCS#11 module + its PIV dependency
-    "${pkgs.yubico-piv-tool}/lib/libykcs11.so"
-    "${pkgs.yubico-piv-tool}/lib/libykpiv.so"
-
-    # pcscd + client library + CCID driver
-    "${pkgs.pcsclite}/bin/pcscd"
-    "${pkgs.pcsclite}/lib/libpcsclite.so.1"
-    "${pkgs.ccid}/lib/pcsc/drivers"
-  ];
-
-  # --- p11-kit module config (so it finds libykcs11) ---
-  boot.initrd.systemd.contents."/etc/pkcs11/modules/ykcs11.module".text = ''
-    module: ${pkgs.yubico-piv-tool}/lib/libykcs11.so
-  '';
-
-  # --- pcscd service in initrd with correct ordering ---
-  boot.initrd.systemd.services.pcscd = {
-    description = "PC/SC Smart Card Daemon (initrd)";
-    wantedBy = [ "cryptsetup-pre.target" ];
-    before = [ "cryptsetup-pre.target" ];
-    unitConfig = {
-      DefaultDependencies = "no";
-    };
-    serviceConfig = {
-      ExecStart = "${pkgs.pcsclite}/bin/pcscd --foreground";
-      Type = "simple";
-    };
-  };
-
-  # --- Running system: pcscd for enrollment/management ---
-  services.pcscd.enable = true;
-
-  # --- Running system: p11-kit module config ---
-  environment.etc."pkcs11/modules/ykcs11.module".text = ''
-    module: ${pkgs.yubico-piv-tool}/lib/libykcs11.so
-  '';
-}
-```
-
-#### 3.2 Open Questions to Resolve During Implementation
-
-These are things that need empirical verification (build and test):
-
-1. **Does `storePaths` follow Nix store closure?** If yes, adding `libcryptsetup-token-systemd-pkcs11.so` might pull in `libp11-kit` automatically. If not, every `.so` in the chain needs explicit listing. **Check `initrd.nix` source to confirm.**
-
-2. **pcscd CCID driver path:** pcscd finds CCID drivers via a compile-time path or `PCSCLITE_HP_DROPDIR` env var. In the initrd, the Nix store path to `${pkgs.ccid}/lib/pcsc/drivers` must be accessible. Verify how NixOS's pcscd.nix configures this on the running system and replicate it for initrd. May need:
-   ```nix
-   boot.initrd.systemd.contents."/etc/reader.conf.d/ccid".text = ''
-     # or whatever pcscd needs to find the CCID bundle
-   '';
-   ```
-   Or an environment variable override in the service unit.
-
-3. **`pcscd.socket` vs `pcscd.service`:** On the running system, pcscd is socket-activated. In the initrd, we may want direct service activation (not socket-activated) to avoid the ordering problem. The draft above uses a direct service. Verify this works — pcscd may refuse to start without its socket unit.
-
-4. **p11-kit trust/config paths:** p11-kit may look for config in paths beyond `/etc/pkcs11/modules/`. Verify with `strace` or p11-kit documentation that the module file location is correct for the initrd environment.
-
-5. **USB kernel modules:** Ensure the initrd has the necessary USB/HID kernel modules to detect the YubiKey. Likely needed:
-   ```nix
-   boot.initrd.availableKernelModules = [ "usbhid" "usb_storage" "xhci_pci" ];
-   ```
-   (Many of these are already included by default on most hardware configs.)
-
-6. **`--auto-exit` flag for pcscd:** Using `--auto-exit` could cause pcscd to exit before systemd-cryptsetup finishes if there's a timing issue. Safer to omit it and let the initrd's switch-root cleanup handle termination.
-
-### Phase 2: NixOS Module (For NUR)
-
-Once Phase 1 is validated, wrap it into a proper NixOS module.
-
-#### 3.3 Module Structure
-
-Target file: `modules/system/boot/initrd-pkcs11.nix` (or similar)
-
-```
-nur-packages/
-└── modules/
-    └── nixos/
-        └── initrd-pkcs11/
-            ├── default.nix          # The NixOS module
-            └── README.md            # Usage documentation
-```
-
-#### 3.4 Module Options to Expose
-
-```nix
-boot.initrd.systemd.pkcs11 = {
-  enable = mkEnableOption "PKCS#11 smartcard support for LUKS unlock in initrd";
-
-  # Which PKCS#11 module to use (default: yubico-piv-tool's libykcs11)
-  package = mkOption {
-    type = types.package;
-    default = pkgs.yubico-piv-tool;
-    description = "Package providing the PKCS#11 module (.so) for the smartcard.";
-  };
-
-  # The .so filename within the package's lib directory
-  modulePath = mkOption {
-    type = types.str;
-    default = "lib/libykcs11.so";
-    description = "Relative path to the PKCS#11 .so module within the package.";
-  };
+pluginEnv = pkgs.buildEnv {
+  name = "pcscd-plugins";
+  paths = map (p: "${p}/pcsc/drivers") config.services.pcscd.plugins;
 };
 ```
+And sets `PCSCLITE_HP_DROPDIR = pluginEnv` (line 115) on the pcscd service.
 
-#### 3.5 Module Implementation Sketch
+**Our module** replicates this pattern exactly for the initrd pcscd service. The `ccid` package installs drivers to `$out/pcsc/drivers/` (specifically `ifd-ccid.bundle/`). Note: `ccid` is a userspace pcscd driver package, NOT a kernel module — `modinfo ccid` returns "not found".
 
-The module's `config` block should:
+### p11-kit module files in `/etc/pkcs11/modules/`
 
-1. Add `libcryptsetup-token-systemd-pkcs11.so` to `boot.initrd.systemd.storePaths`
-2. Add `p11-kit`, the PKCS#11 module package (e.g., `yubico-piv-tool`), `pcsclite`, and `ccid` to store paths
-3. Create `/etc/pkcs11/modules/<name>.module` in `boot.initrd.systemd.contents`
-4. Add the `pcscd` service with correct ordering to `boot.initrd.systemd.services`
-5. Optionally add required kernel modules to `boot.initrd.availableKernelModules`
+**Source:** `pkgs/by-name/p1/p11-kit/package.nix:55` — p11-kit is built with `--sysconfdir=/etc`, so it reads module files from `/etc/pkcs11/modules/` at runtime.
 
-The module should NOT:
-- Auto-configure `boot.initrd.luks.devices` — the user sets `crypttabExtraOpts` themselves
-- Perform enrollment — that's a manual `systemd-cryptenroll` step
-- Assume YubiKey specifically — the module should be generic enough for any PKCS#11 token that uses pcscd (though YubiKey PIV is the primary target)
+**Decision:** The module generates one file per entry in `cfg.modules` via `boot.initrd.systemd.contents`, each containing `module: <path-to-so>`.
 
-### Phase 3: Integration Test
+### pcscd flags: `-f -x -c ${readerConf}`
 
-#### 3.6 Test Strategy
+- **`-f` (foreground):** Required for systemd `Type=simple` service.
+- **`-x` (auto-exit):** Exits 60s after the last PC/SC context is released (last client disconnects). This is desirable in initrd so pcscd cleans up after LUKS unlock rather than lingering through switch-root. Confirmed via `pcscd(8)`: exits on inactivity, not on missing readers.
+- **`-c` (config path):** Explicitly specifies reader.conf path to prevent pcscd from scanning all of `/etc` (nixpkgs issue #121088). The reference `pcscd.nix` always passes this flag (line 134-137).
 
-Write a NixOS VM test (following the pattern of `systemd-initrd-luks-tpm2`):
+### `modules` attrset instead of single `package`/`modulePath`
 
-- This is complex because it requires a virtual smartcard in the VM. Options:
-  - `softhsm2` — a software PKCS#11 implementation that doesn't need pcscd (would test the p11-kit → plugin path but NOT the pcscd path)
-  - `virt_cacard` / `vpcd` — virtual smart card over virtual USB (would test the full path including pcscd, but is much more complex to set up in a NixOS VM test)
-  - **Pragmatic approach:** Start with `softhsm2` to validate the p11-kit/plugin integration, document that pcscd path testing requires real hardware or a virtual smartcard setup.
-
----
-
-## 4. Risk Register
-
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| `storePaths` doesn't follow closures → missing transitive `.so` deps | Medium | Boot fails, falls back to password | Explicitly list all `.so` files; verify with `ldd` |
-| pcscd can't find CCID drivers in initrd Nix store paths | Medium | Token not detected, falls back to password | Check pcscd's driver discovery mechanism; may need env var or config |
-| p11-kit can't find module config in initrd `/etc/pkcs11/modules/` | Medium | Token not detected, falls back to password | Verify p11-kit's search paths; may need `P11_KIT_CONFIG_DIR` env var |
-| Ordering issue: pcscd starts too late despite our overrides | Low | Token not detected, falls back to password | Test carefully; may need additional `After=` / `Requires=` on cryptsetup unit |
-| YubiKey USB not enumerated fast enough in initrd | Low | Token not detected, falls back to password | `token-timeout` in crypttab provides a wait window |
-| NixOS updates change systemd wrapping / store path layout | Low | Future breakage | Pin to specific NixOS version for initial development; add CI test |
-
----
-
-## 5. Reference Links
-
-- **Previous conversation:** https://claude.ai/chat/a1f7860d-ea92-4f04-876b-08577d616387
-- **nixpkgs `luksroot.nix`:** `nixos/modules/system/boot/luksroot.nix` (the TPM2 storePaths pattern)
-- **nixpkgs `initrd.nix`:** `nixos/modules/system/boot/systemd/initrd.nix` (storePaths/contents/services API)
-- **nixpkgs `pcscd.nix`:** `nixos/modules/services/hardware/pcscd.nix` (running-system pcscd reference)
-- **nixpkgs issue #265366:** Vanilla cryptsetup can't use systemd token plugins (FIDO2, PKCS#11, TPM2)
-- **Lennart Poettering's blog post:** https://0pointer.net/blog/unlocking-luks2-volumes-with-tpm2-fido2-pkcs11-security-hardware-on-systemd-248.html
-- **dracut `91pkcs11` commit:** https://github.com/dracutdevs/dracut/commit/83ea8cf (reference for what dracut installs for PKCS#11)
-- **Nitrokey/Gentoo guide:** https://vtimofeenko.com/posts/unlocking-luks2-with-x509-nitrokey-during-boot/ (non-NixOS full-chain walkthrough)
-
----
-
-## 6. Glossary
-
-- **PIV:** Personal Identity Verification — the smart card applet on YubiKeys used for X.509 certificate-based crypto operations
-- **PKCS#11:** Standard API for cryptographic tokens (smart cards, HSMs). `libykcs11.so` implements this for YubiKey PIV.
-- **p11-kit:** Middleware that loads PKCS#11 modules based on config files in `/etc/pkcs11/modules/`
-- **pcscd:** PC/SC Smart Card Daemon — userspace daemon that manages communication with smart card readers over USB/CCID
-- **CCID:** USB device class for smart card readers; the `ccid` package provides the driver that pcscd uses
-- **crypttab:** `/etc/crypttab` — systemd reads this (or generates it from the generator) to know how to open LUKS volumes. `pkcs11-uri=pkcs11:` tells it to try PKCS#11.
-- **`libcryptsetup-token-systemd-pkcs11.so`:** The cryptsetup token plugin shipped with systemd. Loaded by `libcryptsetup` when processing a PKCS#11 token entry in the LUKS2 header.
-- **`cryptsetup-pre.target`:** systemd target that runs before any LUKS volumes are opened. Services needed for unlock (like pcscd) should be wanted by this target.
-
----
-
-## 7. Research Results (2026-04-03 — Claude Code Review)
-
-### 7.1 Current Implementation State
-
-A first draft of the NixOS module exists at `modules/boot/initrd-pkcs11.nix` and is wired into `modules/default.nix` and exposed via `flake.nix` as `nixosModules.initrd-pkcs11`. A dev shell with smartcard tooling was added to `flake.nix`.
-
-### 7.2 Verified Research Findings
-
-#### `make-initrd-ng` DOES Follow ELF Dependencies (Partially)
-- **Source:** `pkgs/build-support/kernel/make-initrd-ng/src/main.rs`
-- `make-initrd-ng` **does** parse ELF `DT_NEEDED` entries and follows RPATH/RUNPATH to include direct shared library dependencies automatically.
-- It also supports systemd's `.note.dlopen` ELF metadata for conditional dlopen dependencies.
-- **However**, libraries loaded via `dlopen()` at runtime (without ELF notes) — like p11-kit loading `libykcs11.so` from a config file — are NOT auto-detected and must be listed explicitly in `storePaths`.
-- **Impact on module:** The `libcryptsetup-token-systemd-pkcs11.so` will auto-pull `libp11-kit.so` (since it's a direct ELF dependency). But `libykcs11.so` (loaded by p11-kit at runtime) must be explicit — which the module already does correctly.
-
-#### `boot.initrd.systemd.sockets` Exists
-- **Source:** `nixos/modules/system/boot/systemd/initrd.nix:374`
-- There is a proper `boot.initrd.systemd.sockets` option (type: `initrdSockets`) alongside `services`, `targets`, `paths`, etc.
-- The `wantedBy` attribute on these NixOS options creates `.wants` symlinks declaratively during build. Raw `[Install] WantedBy=` in unit text does nothing in initrd (no `systemctl enable`).
-
-#### `pcsclite` Driver Discovery via `PCSCLITE_HP_DROPDIR`
-- **Source:** `pkgs/by-name/pc/pcsclite/package.nix:49`
-- Compile-time `usbdropdir` is set to `/var/lib/pcsc/drivers` (a non-existent Nix store path).
-- The running system pcscd module overrides this with `PCSCLITE_HP_DROPDIR` env var pointing to a `buildEnv` of `${plugin}/pcsc/drivers`.
-- **Important:** The `ccid` package's drivers live at `${pkgs.ccid}/lib/pcsc/drivers/` (note the `lib/` prefix).
-
-#### p11-kit Module Discovery
-- **Source:** `pkgs/by-name/p1/p11-kit/package.nix:54-55`
-- p11-kit is built with `--sysconfdir=/etc`, so it reads module files from `/etc/pkcs11/modules/`.
-- The nixpkgs package patches `p11-kit/meson.build` to install sample configs to `$out/etc/pkcs11` (line 74-75).
-- **The module's `contents."/etc/pkcs11/modules/${cfg.moduleName}.module"` approach is correct.**
-
-#### `ccid` is NOT a Kernel Module
-- `modinfo ccid` returns "Module ccid not found."
-- `ccid` is a userspace pcscd driver package providing `lib/pcsc/drivers/ifd-ccid.bundle/`.
-- There is no kernel module named "ccid".
-
-#### `yubico-piv-tool` Outputs
-- **Source:** `pkgs/by-name/yu/yubico-piv-tool/package.nix`
-- Provides `libykcs11.so` and `libykpiv.so` (pkgConfigModules: `ykcs11`, `ykpiv`).
-- Runtime deps: `openssl`, `pcsclite` (as buildInputs).
-- Single output `out` contains both binaries and libraries.
-
-#### systemd Issue #23479 — PKCS#11 URI `type=cert` vs `type=private`
-- When enrolling via `systemd-cryptenroll --pkcs11-token-uri=auto`, the URI stored in LUKS2 header might use `type=cert` instead of `type=private`.
-- This was fixed in systemd PR #29692 which auto-converts the URI during enrollment.
-- **Impact:** Users on older systemd versions may need to use `--pkcs11-token-uri=pkcs11:` (bare URI) to avoid this issue.
-
-#### NixOS TPM2 Test Pattern (Reference)
-- **Source:** `nixos/tests/systemd-initrd-luks-tpm2.nix`
-- Pattern: create LUKS volume → enroll token → reboot into specialisation → verify mount.
-- Uses `virtualisation.tpm.enable = true` for virtual TPM.
-- PKCS#11 test would need a virtual smartcard (e.g., `softhsm2` or `vpcd`/`virt_cacard`).
-
-#### No Existing Community PKCS#11 Initrd Module
-- No NUR packages, nixpkgs PRs, or Discourse posts found implementing PKCS#11 initrd support for NixOS.
-- The existing [nixos-yubikey-luks](https://github.com/sgillespie/nixos-yubikey-luks) repo uses HMAC-SHA1 challenge-response (not PIV/PKCS#11) and is unmaintained (last commit 2019).
-- This module would be the first NixOS implementation of PIV/PKCS#11-based LUKS initrd unlock.
-
-### 7.3 Bugs Found in Current `initrd-pkcs11.nix`
-
-#### BUG 1 (Critical): `pcscd.socket` Uses Raw `units` — WantedBy Won't Work
-**Location:** `modules/boot/initrd-pkcs11.nix:112-126`
-
-The module defines `boot.initrd.systemd.units."pcscd.socket"` with raw unit text containing `[Install] WantedBy=cryptsetup-pre.target`. In NixOS initrd, this `[Install]` section is informational only — it requires `systemctl enable` to create symlinks, which doesn't happen during build.
-
-**Fix:** Use `boot.initrd.systemd.sockets.pcscd` with the `wantedBy` NixOS option:
+**Decision:** A single `modules` option (`attrsOf str`) mapping names to `.so` paths:
 ```nix
-boot.initrd.systemd.sockets.pcscd = {
-  wantedBy = [ "cryptsetup-pre.target" ];
-  unitConfig.DefaultDependencies = false;
-  listenStreams = [ "/run/pcscd/pcscd.comm" ];
-  socketConfig.SocketMode = "0666";
-};
-```
-
-#### BUG 2: `"ccid"` in `availableKernelModules` is Invalid
-**Location:** `modules/boot/initrd-pkcs11.nix:151`
-
-`ccid` is a userspace pcscd driver package, not a kernel module. Adding it to `availableKernelModules` will silently do nothing (or cause a warning).
-
-**Fix:** Remove `"ccid"` from the kernel modules list.
-
-#### ~~BUG 3: `pluginEnv` Path Structure Mismatch~~ — VERIFIED CORRECT
-**Location:** `modules/boot/initrd-pkcs11.nix:15`
-
-The `ccid` package installs drivers to `$out/pcsc/drivers` (confirmed in `pkgs/by-name/cc/ccid/package.nix:31`). The module's `"${p}/pcsc/drivers"` path matches both the package output and the reference `pcscd.nix` pattern. **This is correct.**
-
-#### ~~BUG 4: `pcscd` ExecStart Uses `--auto-exit` Flag~~ — NOT A BUG
-**Location:** `modules/boot/initrd-pkcs11.nix:135`
-
-Initially thought `--auto-exit` would cause pcscd to exit before USB enumeration. **This is incorrect.** Per `pcscd(8)`, `--auto-exit` (`-x`) means "quit after 60 seconds of inactivity after the release of the last PC/SC context" — it exits 60s after the last *client disconnects*, not when no readers are found. pcscd waits for clients regardless of reader state. 60 seconds is more than sufficient. Furthermore, `--auto-exit` is *desirable* in the initrd so pcscd cleans up after LUKS unlock rather than lingering through switch-root. The reference `pcscd.nix` also uses `-x`.
-
-**Action:** Kept `--auto-exit` (short form `-x`). Switched from long-form flags to short-form (`-f -x -c`) to match reference `pcscd.nix` style.
-
-#### Issue 5: Missing `-c` Flag for pcscd Config File
-**Location:** `modules/boot/initrd-pkcs11.nix:135`
-
-The reference pcscd.nix always passes `-c ${cfgFile}` to prevent pcscd from scanning `/etc` for config files (nixpkgs issue #121088). The initrd module should do the same.
-
-#### Issue 6: `pcscd.service` Should Have `Before` Ordering
-The service should explicitly declare `before = [ "cryptsetup-pre.target" ]` to ensure it's fully started before LUKS unlock attempts begin.
-
-### 7.4 Risk Register Updates
-
-| Risk | Status | Notes |
-|---|---|---|
-| `storePaths` doesn't follow closures | **RESOLVED** | `make-initrd-ng` follows ELF `DT_NEEDED` deps. Only dlopen'd libs need explicit listing. |
-| pcscd can't find CCID drivers | **RESOLVED** | `pluginEnv` path `"${p}/pcsc/drivers"` matches `ccid` output (`$out/pcsc/drivers`). |
-| p11-kit can't find module config | **RESOLVED** | p11-kit uses `--sysconfdir=/etc`, our `/etc/pkcs11/modules/` path is correct. |
-| Ordering issue: pcscd starts too late | **FIXED** | BUG 1: Replaced raw `units."pcscd.socket"` with `sockets.pcscd` using NixOS `wantedBy` attribute. |
-| `--auto-exit` race condition | **NOT A BUG** | `-x`/`--auto-exit` exits 60s after last PC/SC context release, not on missing readers. Desirable in initrd for cleanup. |
-
----
-
-## 8. Bug Fixes Applied (2026-04-03)
-
-All bugs identified in section 7.3 have been fixed. Module evaluation verified with `lib.nixosSystem`.
-
-### Fixes Applied
-
-| Bug | Fix | Verified |
-|---|---|---|
-| **BUG 1** (Critical): `pcscd.socket` raw unit `[Install] WantedBy=` does nothing in initrd | Replaced `boot.initrd.systemd.units."pcscd.socket"` with `boot.initrd.systemd.sockets.pcscd` using NixOS `wantedBy` attribute that creates `.wants/` symlinks at build time | `nix eval` confirms `socketWantedBy = [ "cryptsetup-pre.target" ]` |
-| **BUG 2**: `"ccid"` in `availableKernelModules` is invalid (userspace driver, not kernel module) | Removed `"ccid"` from list; added comment explaining it's handled via `pluginEnv`/`PCSCLITE_HP_DROPDIR` | `nix eval` confirms only real kernel modules present |
-| ~~**BUG 4**~~: `--auto-exit` initially thought to risk race condition | **Not a bug.** `-x`/`--auto-exit` exits 60s after last client disconnects, not on missing readers. Kept; switched to short-form flags (`-f -x -c`) matching reference. | Verified via `pcscd(8)` man page |
-| **Issue 5**: Reference pcscd.nix always passes `-c ${cfgFile}` (nixpkgs#121088) | Already had `-c ${readerConf}`, kept and clarified with comment | Verified in module source |
-| **Issue 6**: `pcscd.service` missing `Before` ordering | Added `before = [ "cryptsetup-pre.target" ]` to service | `nix eval` confirms `serviceBefore = [ "cryptsetup-pre.target" ]` |
-
-### Eval Test Suite
-
-Created `tests/initrd-pkcs11-eval.nix` (same pattern as `tests/mktxp-eval.nix`) with 8 test groups, wired into `flake.nix` as `checks.*.initrd-pkcs11-eval-*`:
-
-| Test | What it checks |
-|---|---|
-| `pcscd-socket` | Socket exists, wantedBy `cryptsetup-pre.target`, `DefaultDependencies=false`, listens on `/run/pcscd/pcscd.comm` |
-| `pcscd-service` | Service exists, after `pcscd.socket`, before `cryptsetup-pre.target`, `-f -x -c` flags, `PCSCLITE_HP_DROPDIR` set |
-| `store-paths` | `libcryptsetup-token-systemd-pkcs11.so`, `libykcs11.so`, `pcscd` present in storePaths |
-| `p11-kit-module` | `/etc/pkcs11/modules/ykcs11.module` exists with correct content |
-| `reader-conf` | `/etc/reader.conf` present in initrd contents |
-| `kernel-modules` | `usbhid`, `xhci_pci` present; `ccid` NOT present |
-| `disabled` | No pcscd socket/service/storePaths when `enable = false` |
-| `custom-package` | Custom `package`/`modulePath`/`moduleName` (opensc) reflected correctly |
-
-All 8 tests pass: `nix build .#checks.x86_64-linux.initrd-pkcs11-eval-*`
-
-**Note:** `storePaths` entries in NixOS are structured submodules (`{ source, target, dlopen, enable }`) — tests check `p.source` for path matching, not the entry directly.
-
----
-
-## 9. Options Refactoring (2026-04-04)
-
-### Motivation
-
-The original three options (`package`, `modulePath`, `moduleName`) were unnecessarily complex:
-- `package` was always used together with `modulePath` to form a single store path
-- There was no use case requiring `package` as a separate option
-- Only one PKCS#11 module could be configured at a time
-
-### New Design
-
-Replaced all three with a single `modules` attrset:
-
-```nix
-boot.initrd.systemd.pkcs11.modules = {
+modules = {
   ykcs11 = "${pkgs.yubico-piv-tool}/lib/libykcs11.so";
-  # Multiple modules can be specified for multi-vendor support:
-  # opensc = "${pkgs.opensc}/lib/opensc-pkcs11.so";
 };
 ```
 
-- Type: `lib.types.attrsOf lib.types.str`
-- Each key becomes a p11-kit module file: `/etc/pkcs11/modules/<name>.module`
-- Each value is the absolute Nix store path to the `.so` library
-- Default: `{ ykcs11 = "${pkgs.yubico-piv-tool}/lib/libykcs11.so"; }`
-
-### Implementation Changes
-
-1. **Module (`modules/boot/initrd-pkcs11.nix`):**
-   - Removed `package`, `modulePath`, `moduleName` options
-   - Added `modules` attrset option
-   - `storePaths` now uses `lib.attrValues cfg.modules` to include all .so files
-   - `contents` uses `lib.mapAttrs'` to generate one p11-kit module file per entry
-
-2. **Eval tests (`tests/initrd-pkcs11-eval.nix`):**
-   - Replaced `custom-package` test (Scenario C: opensc) with `multi-module` test
-   - Scenario C now tests two simultaneous modules (ykcs11 + opensc)
-   - All 8 tests pass
+Each key becomes a p11-kit module file; each value is added to `storePaths`. Supports multi-vendor setups. Default: `{ ykcs11 = "${pkgs.yubico-piv-tool}/lib/libykcs11.so" }`.
 
 ---
 
-## 10. VM Integration Test (2026-04-04) — IN PROGRESS
-
-### Strategy
-
-Using **softhsm** as a software PKCS#11 token to test the full unlock chain:
-`systemd-cryptsetup` → `libcryptsetup-token-systemd-pkcs11.so` → p11-kit → `libsofthsm2.so` → token data
-
-**What this tests:** p11-kit module discovery, cryptsetup PKCS#11 token plugin, LUKS enrollment and unlock, store path completeness in initrd.
-
-**What this does NOT test:** pcscd/CCID/USB stack (softhsm is a pure software token that doesn't need pcscd). Testing the full pcscd chain requires real hardware or `vsmartcard-vpcd`.
-
-### Test Architecture
-
-File: `tests/initrd-pkcs11.nix`, wired into flake as `checks.x86_64-linux.initrd-pkcs11`.
-
-Pattern follows `nixos/tests/systemd-initrd-luks-tpm2.nix`:
-1. **First boot:** Create LUKS volume → enroll softhsm PKCS#11 token via `systemd-cryptenroll`
-2. **Reboot** into specialisation that imports `initrd-pkcs11` module
-3. **Second boot:** Verify LUKS volume unlocked and mounted via PKCS#11
-
-### Softhsm-Specific Setup
-
-Softhsm has requirements that real hardware tokens (YubiKey) don't:
-- **Config file:** `SOFTHSM2_CONF` env var pointing to `softhsm2.conf` (specifies token directory)
-- **Token data:** Pre-built at Nix build time via `pkgs.runCommand` — initializes softhsm slot, generates RSA 2048 key pair, imports self-signed X.509 certificate (required by `systemd-cryptenroll`)
-- **Initrd injection:** Both `softhsm2.conf` and token data directory must be in initrd `contents`
-
-### Key Challenge: Environment Variable Injection
-
-`systemd-cryptsetup@` is spawned by the systemd cryptsetup generator. We need `SOFTHSM2_CONF=/etc/softhsm2.conf` in its environment. Approaches considered:
-
-1. ~~**Drop-in conf file** at `/etc/systemd/system/systemd-cryptsetup@.service.d/`~~ — Failed because `/etc/systemd/system` is a symlink to a Nix store path (`stage1Units`), and `make-initrd-ng` cannot create subdirectories inside it via `contents`. The `@` in the service name also complicates directory creation.
-
-2. **`boot.initrd.systemd.settings.Manager.DefaultEnvironment`** — Sets the `DefaultEnvironment=` directive in initrd `system.conf`, which applies to all services including generator-spawned ones like `systemd-cryptsetup@`. Current approach:
-   ```nix
-   boot.initrd.systemd.settings.Manager.DefaultEnvironment =
-     lib.mkForce "PATH=/bin:/sbin SOFTHSM2_CONF=/etc/softhsm2.conf";
-   ```
-   Caveat: uses `mkForce` to override the default `PATH=/bin:/sbin` — the PATH must be preserved.
-
-3. *(Not tried)* `boot.initrd.systemd.units` with `overrideStrategy` — might work for creating drop-ins within the `stage1Units` derivation, but more complex.
-
-### Test Token Preparation
-
-The `testTokenData` derivation:
-```
-softhsm2-util --init-token  →  creates slot with PIN=1234, SO-PIN=12345678
-softhsm2-util --import      →  imports RSA 2048 private key as id=01
-pkcs11-tool --write-object   →  imports matching X.509 DER certificate as id=01
-```
-
-PKCS#11 URI for enrollment and unlock: `pkcs11:token=test;pin-value=1234`
-
-### Build Attempts and Issues Encountered
-
-1. **x86_64-linux + `useBootLoader`/specialisation/reboot pattern** — Failed. `make-initrd-ng` permission error: "failed to create directories to `./root//etc/systemd/system/systemd-cryptsetup@.service.d`" because `/etc/systemd/system` is a symlink to the Nix store `stage1Units`. Fixed by switching from drop-in to `DefaultEnvironment` in `system.conf`.
-
-2. **x86_64-linux + `useBootLoader`** (with DefaultEnvironment fix) — Building worked, but the disk image builder step internally runs QEMU to create a UEFI disk image. Under Rosetta (the host is aarch64 Apple M1 Pro → AppleVZ Linux VM), this x86_64 QEMU runs under emulation and is extremely slow. The disk image build hung.
-
-3. **aarch64-linux + `useBootLoader`** — Same problem: `useBootLoader = true` triggers `nixos-disk-image` which runs its own QEMU VM internally. Without KVM (not available in AppleVZ), the inner QEMU falls back to TCG and produces `error while reading directory` / `virtiofsd` errors and hangs.
-
-4. **aarch64-linux + simplified test (no `useBootLoader`)** — **Progressed significantly.** Removed `useBootLoader`/`useEFIBoot`/`mountHostNixStore`/specialisation. Uses `runNixOSTest` (like mktxp test). Tests enrollment + unlock in a single boot using `systemd-cryptsetup attach` directly instead of reboot. VM boots successfully (~2 min under TCG), token is detected, LUKS volume created, `systemd-cryptenroll` starts and discovers the softhsm module. **But RSA crypto operations under TCG are extremely slow** — enrollment stuck for 10+ minutes with no progress. The mktxp test works fine because it doesn't do crypto.
-
-### Current Status
-
-- **Both tests evaluate correctly** on both architectures
-- **Single-boot test partially verified** — VM boots, softhsm token data loads, `systemd-cryptenroll` finds the PKCS#11 module via p11-kit. Crypto operations too slow under TCG to complete.
-- **Boot-cycle test not yet run** — requires KVM
-- **Cannot complete on current hardware** — RSA operations via softhsm in QEMU/TCG (no KVM) are too slow
-- All 8 eval tests pass: `nix build .#checks.aarch64-linux.initrd-pkcs11-eval-{pcscd-socket,pcscd-service,store-paths,p11-kit-module,reader-conf,kernel-modules,disabled,multi-module} --no-link`
-
-### VM Test Inventory
-
-| Flake check | File | Description | KVM required? |
-|---|---|---|---|
-| `initrd-pkcs11` | `tests/initrd-pkcs11.nix` | Single-boot: enroll + `systemd-cryptsetup attach` | Recommended (crypto is slow under TCG) |
-| `initrd-pkcs11-boot` | `tests/initrd-pkcs11-boot.nix` | Full boot-cycle: enroll → reboot → initrd unlocks LUKS | **Yes** (`useBootLoader` disk image builder hangs under TCG) |
-
-Both tests use **softhsm** as a software PKCS#11 token (no pcscd needed). They share the same `testTokenData` derivation that pre-builds an RSA 2048 key pair + X.509 certificate.
-
-### Files Modified
-
-| File | Change |
-|---|---|
-| `modules/boot/initrd-pkcs11.nix` | Replaced `package`/`modulePath`/`moduleName` with `modules` attrset |
-| `tests/initrd-pkcs11-eval.nix` | Updated for new options; replaced `custom-package` with `multi-module` test |
-| `tests/initrd-pkcs11.nix` | **NEW** — Single-boot VM test (enroll + attach) |
-| `tests/initrd-pkcs11-boot.nix` | **NEW** — Full boot-cycle VM test (enroll → reboot → initrd unlock) |
-| `flake.nix` | Added both VM tests to Linux-only checks |
-
----
-
-## 11. Continuation Instructions for VM Integration Tests
-
-This section is written for a developer or Claude Code session that will continue
-working on the VM integration tests from a different host.
-
-### Prerequisites
-
-- A host with **KVM support** (native Linux with `/dev/kvm`, or macOS with appropriate QEMU acceleration)
-- Clone or access to the repository at the current state
-- `nix` with flakes enabled
-
-### Quick Verification
-
-```bash
-# 1. Eval tests (should pass everywhere, no VM needed):
-nix build .#checks.x86_64-linux.initrd-pkcs11-eval-{pcscd-socket,pcscd-service,store-paths,p11-kit-module,reader-conf,kernel-modules,disabled,multi-module} --no-link
-
-# 2. Single-boot VM test (enroll + attach, no reboot):
-nix build .#checks.x86_64-linux.initrd-pkcs11 --no-link --print-build-logs
-
-# 3. Full boot-cycle VM test (enroll → reboot → initrd unlock):
-nix build .#checks.x86_64-linux.initrd-pkcs11-boot --no-link --print-build-logs
-```
-
-Use `aarch64-linux` instead of `x86_64-linux` on ARM hosts.
-
-### What the Tests Do
-
-**`initrd-pkcs11` (single-boot):**
-1. Boot VM, copy pre-built softhsm token data to `/var/lib/softhsm/tokens/`
-2. `cryptsetup luksFormat /dev/vdb` (empty disk image)
-3. `systemd-cryptenroll --pkcs11-token-uri='pkcs11:token=test;pin-value=1234' /dev/vdb`
-4. `systemd-cryptsetup attach test-crypt /dev/vdb - 'pkcs11-uri=...'`
-5. Verify `/dev/mapper/test-crypt` exists, create ext4, mount, write marker
-
-**`initrd-pkcs11-boot` (boot-cycle):**
-1. Boot VM (with UEFI boot loader), enroll as above
-2. `bootctl set-default` to specialisation, crash + reboot
-3. Specialisation boots with `boot.initrd.luks.devices.cryptroot` pointing to `/dev/vdb`
-4. `systemd-cryptsetup` in initrd unlocks via PKCS#11 automatically
-5. Verify `/dev/mapper/cryptroot on / type ext4` in `mount` output
-
-### Softhsm-Specific Test Setup (Would NOT Apply to Real YubiKey)
-
-These parts of the test are softhsm workarounds, not part of the module itself:
-
-1. **`testTokenData` derivation** — Pre-builds softhsm slot with RSA 2048 key + X.509 cert at Nix build time. The cert import uses `pkcs11-tool` because `softhsm2-util` can only import keys, not certs.
-
-2. **`SOFTHSM2_CONF` env var** — softhsm needs this to find `softhsm2.conf` (which points to the token directory). Real YubiKeys carry keys in hardware and need no config file.
-
-3. **`DefaultEnvironment` in initrd `system.conf`** (boot-cycle test only) — Sets `SOFTHSM2_CONF=/etc/softhsm2.conf` for all initrd services including generator-spawned `systemd-cryptsetup@`. Uses `lib.mkForce` to override the default `PATH=/bin:/sbin` (PATH is preserved in the override value). A drop-in conf at `/etc/systemd/system/systemd-cryptsetup@.service.d/` was tried but failed because `/etc/systemd/system` is a symlink to the Nix store `stage1Units` directory.
-
-4. **Token data + config in initrd `contents`** (boot-cycle test only) — Both `/etc/softhsm2.conf` and `/var/lib/softhsm/tokens` are injected into the initrd.
-
-### Known Issues and Things to Watch
-
-1. **~~Crypto slowness~~ RESOLVED** — RSA 2048 enrollment+unlock completes in ~0.5s total under QEMU/TCG on aarch64-darwin. The earlier "15-minute hang" was caused by the missing `$PIN` env var (see item 3 below), not crypto performance.
-
-2. **softhsm token writability** — softhsm may need write access to the token directory for internal locking. The `contents` approach copies token data as read-only Nix store paths into the initrd. If unlock fails with "read-only" errors in the boot-cycle test, a workaround may be needed (e.g. `tmpfiles` rule to copy token data to a writable tmpfs before cryptsetup runs, or use softhsm's `objectstore.backend = file` without locking).
-
-3. **~~`pin-value=` in PKCS#11 URI~~ RESOLVED — `$PIN` env var required** — systemd's `pkcs11_token_login()` (in `src/shared/pkcs11-util.c:262`) does NOT read `pin-value=` from the PKCS#11 URI. Instead it: (a) tries NULL login, (b) reads the `$PIN` env var via `getenv_steal_erase("PIN")`, (c) falls back to `ask_password_auto()` with `UINT64_MAX` timeout — which hangs forever in non-interactive contexts. **Fix:** Always set `PIN=<pin>` in the environment when calling `systemd-cryptenroll` or `systemd-cryptsetup`. Similarly, `PASSWORD=<passphrase>` provides the existing LUKS passphrase to `systemd-cryptenroll` without interactive prompt.
-
-4. **EC keys incompatible with softhsm for LUKS unlock** — EC P-256/P-384 keys imported via `softhsm2-util` get `Usage: sign, signRecover` but NOT `CKA_DERIVE`. systemd's PKCS#11 unlock needs `CKA_DERIVE` for ECDH key agreement. RSA 2048 keys work because `softhsm2-util` correctly sets `CKA_DECRYPT`. Real YubiKey PIV slots may handle EC differently (the PKCS#11 module controls attribute flags), but for softhsm-based testing, **use RSA 2048**.
-
-5. **systemd version dependency** — `systemd-cryptenroll` PKCS#11 support improved over versions. URI handling (cert vs private key, auto-detection) was fixed in systemd PR #29692. The nixpkgs-unstable version should be recent enough.
-
-6. **Cross-platform package references** — The outer `pkgs` in test files is the *host* platform (e.g. aarch64-darwin). Inside `nodes.machine`, `pkgs` is the *VM* platform (aarch64-linux). Store paths for shared libraries (`.so` files) used inside the VM **must** reference the node's `pkgs`, not the outer `pkgs`. The `testTokenData` derivation is an exception: it builds on the host, but its output is arch-independent data files. **Fix:** Define `softhsmModule` and `softhsmConf` inside the `nodes.machine` let-block where `pkgs` is Linux.
-
-7. **Darwin VM tests work** — `pkgs.testers.runNixOSTest` works on aarch64-darwin via QEMU with TCG (HVF is unavailable inside the nix build sandbox). The full single-boot test completes in ~18s. The boot-cycle test (`initrd-pkcs11-boot`) requires KVM and will be very slow or hang under pure TCG.
-
-### Architecture of the Module Under Test
+## 5. Module Architecture
 
 ```
 modules/boot/initrd-pkcs11.nix
@@ -717,9 +165,225 @@ modules/boot/initrd-pkcs11.nix
 │   ├── modules             (attrsOf str: name → /nix/store/.../lib*.so)
 │   └── pcscd.plugins       (listOf package, default: [pkgs.ccid])
 └── config (when enabled)
-    ├── storePaths          [cryptsetup-token-systemd-pkcs11.so, each module .so, pcscd, pluginEnv]
+    ├── storePaths          [cryptsetup-token-systemd-pkcs11.so, libp11-kit.so.0, p11-kit-trust.so, each module .so, pcscd, pluginEnv]
     ├── contents            [/etc/pkcs11/modules/<name>.module per module, /etc/reader.conf]
     ├── sockets.pcscd       [wantedBy cryptsetup-pre.target, DefaultDependencies=false]
-    ├── services.pcscd      [after pcscd.socket, before cryptsetup-pre.target, -f -x -c]
+    ├── services.pcscd      [requires+after pcscd.socket (matching upstream), before cryptsetup-pre.target + switch-root + shutdown, conflicts switch-root + shutdown, -f -x -c]
     └── availableKernelModules [usbhid, xhci_pci, xhci_hcd, ehci_pci, ehci_hcd]
 ```
+
+---
+
+## 6. Key Technical Findings
+
+### systemd PIN handling (CRITICAL)
+
+systemd's `pkcs11_token_login()` (`src/shared/pkcs11-util.c:262`) does NOT read `pin-value=` from the PKCS#11 URI. The actual flow:
+1. Try NULL login
+2. Read `$PIN` env var via `getenv_steal_erase("PIN")`
+3. Fall back to `ask_password_auto()` with `UINT64_MAX` timeout — **hangs forever** in non-interactive contexts
+
+**Always set `PIN=<pin>` in the environment** for `systemd-cryptenroll` and `systemd-cryptsetup`. Similarly, `PASSWORD=<passphrase>` provides the existing LUKS passphrase to `systemd-cryptenroll` (read via `getenv_steal_erase("PASSWORD")` in `src/cryptenroll/cryptenroll-password.c:30`).
+
+For the boot-cycle test, `PIN` must reach the generator-spawned `systemd-cryptsetup@` service in initrd. This is done via `boot.initrd.systemd.settings.Manager.DefaultEnvironment` (which writes to initrd `system.conf`, applying to all services). For real YubiKey usage, the PIN would come from `ask_password_auto()` (plymouth, console prompt, or systemd-ask-password agent).
+
+### EC keys don't work with softhsm
+
+EC keys (P-256/P-384) imported via `softhsm2-util` get `Usage: sign, signRecover` but NOT `CKA_DERIVE`. systemd needs `CKA_DERIVE` for ECDH key agreement (dispatched in `src/shared/openssl-util.c:1240-1398`, `pkey_generate_volume_keys()` → EC variant needs ECDH). RSA 2048 works because `softhsm2-util` correctly sets `CKA_DECRYPT`. Real YubiKey PIV may handle EC differently (the PKCS#11 module controls attribute flags). **Use RSA 2048 for softhsm-based testing.**
+
+### Cross-platform test architecture
+
+The outer `pkgs` in test files is the *host* platform (e.g. aarch64-darwin). Inside `nodes.machine`, `pkgs` is the *VM* platform (aarch64-linux). `.so` paths used in the VM must reference the node's `pkgs`.
+
+The `testTokenData` derivation is an exception: it builds on the host, but outputs arch-independent data files (serialised softhsm token directory state).
+
+QEMU binary selection is in `nixos/lib/qemu-common.nix:46`: aarch64-darwin hosting aarch64-linux uses `qemu-system-aarch64 -machine virt,gic-version=2,accel=hvf:tcg -cpu max`. HVF is unavailable in the nix build sandbox, so it falls back to TCG.
+
+### systemd URI handling
+
+`systemd-cryptenroll` PKCS#11 URI handling (cert vs private key auto-detection) was fixed in systemd PR #29692. nixpkgs-unstable should be recent enough. nixpkgs issue #265366 confirms that vanilla `cryptsetup` cannot use systemd's token plugins (FIDO2, PKCS#11, TPM2) outside of `systemd-cryptsetup` due to `LD_LIBRARY_PATH` issues — the NixOS wrapper handles this.
+
+---
+
+## 7. Test Inventory
+
+| Check | File | Description | Works on TCG? |
+|---|---|---|---|
+| `initrd-pkcs11-eval-*` | `tests/initrd-pkcs11-eval.nix` | 8 pure eval tests for module options | Yes (no VM) |
+| `initrd-pkcs11` | `tests/initrd-pkcs11.nix` | Single-boot: enroll + attach | **Yes** (~18s) |
+| `initrd-pkcs11-boot` | `tests/initrd-pkcs11-boot.nix` | Boot-cycle: enroll → reboot → initrd unlock | **Yes** (~53s on aarch64-darwin/TCG) |
+
+### Softhsm test setup (not needed for real YubiKey)
+
+Both VM tests use softhsm as a software PKCS#11 token. This tests the p11-kit → PKCS#11 module → libcryptsetup-token-systemd-pkcs11.so chain, but NOT the pcscd/CCID/USB stack (softhsm doesn't need pcscd). Testing the full pcscd chain requires `vsmartcard-vpcd` or real hardware.
+
+Softhsm-specific parts:
+- `testTokenData` derivation: pre-builds softhsm slot with RSA 2048 key + X.509 cert at Nix build time. The cert import uses `pkcs11-tool` because `softhsm2-util` can only import keys, not certs.
+- `SOFTHSM2_CONF` env var: points softhsm to `softhsm2.conf` (token directory location). Real YubiKeys carry keys in hardware and need no config file.
+- Boot-cycle test: `DefaultEnvironment` in initrd `system.conf` sets `SOFTHSM2_CONF` and `PIN` for generator-spawned services. Uses `lib.mkForce` to override the default `PATH=/bin:/sbin` (PATH is preserved in the override value).
+- Boot-cycle test: `softhsm-copy-tokens` oneshot service copies read-only token data to writable tmpfs, ordered `before` the specific `systemd-cryptsetup@cryptroot.service` using the clevis ordering pattern.
+- Boot-cycle test: token data + config injected into initrd via `contents`.
+
+---
+
+## 8. Boot-Cycle Test Debugging History (All Resolved)
+
+The boot-cycle test (`initrd-pkcs11-boot`) was debugged through multiple iterations (2026-04-03 to 2026-04-05). All issues have been resolved and the test passes in ~53s on aarch64-darwin/TCG.
+
+#### 1. nixpkgs `__structuredAttrs` bug (disk image builder hang)
+
+`useBootLoader = true` triggers `make-disk-image.nix` → `vmTools.runInLinuxVM`. nixpkgs PR #498273 added `__structuredAttrs = true` to `runInLinuxVM`, which broke `lib.overrideDerivation` — the `requiredSystemFeatures = ["kvm"]` attribute was silently dropped. **Fix:** Pinned `flake.lock` to nixpkgs `bcd464ccd2a1` (pre-bug). **Upstream:** nixpkgs issue #505925, revert PR #505929.
+
+#### 2. Missing PIN in initrd DefaultEnvironment
+
+systemd's `pkcs11_token_login()` reads PIN from `$PIN` env var. **Fix:** Added `PIN=1234` to `boot.initrd.systemd.settings.Manager.DefaultEnvironment` (writes to initrd `system.conf`, affecting all services including generator-spawned ones).
+
+#### 3. Softhsm token data not writable in initrd
+
+Softhsm needs write access to its token directory for internal lock files. `boot.initrd.systemd.contents` creates read-only store paths. **Fix:** `softhsm-copy-tokens` oneshot service copies token data from read-only `/var/lib/softhsm/tokens-ro` to writable `/var/lib/softhsm/tokens/`. Uses `extraBin` for coreutils and `storePaths` for the script (because `make-initrd-ng` doesn't follow Nix store references in shell scripts).
+
+#### 4. `libp11-kit.so.0` missing from initrd (root cause of kernel panic)
+
+`libcryptsetup-token-systemd-pkcs11.so` loads `libp11-kit.so.0` via `dlopen()` at runtime — NOT as an ELF dependency. Without it: error -95 (ENOTSUP) → `systemd-cryptsetup@cryptroot.service` exits 1 → `boot.panic_on_fail` triggers sysrq crash. **Fix:** Added `"${pkgs.p11-kit}/lib/libp11-kit.so.0"` and `"${pkgs.p11-kit}/lib/pkcs11/p11-kit-trust.so"` to `storePaths` in the module.
+
+#### 5. Token not found / passphrase prompt hang (service ordering)
+
+After libp11-kit fix, systemd-cryptsetup loaded p11-kit successfully but couldn't find the softhsm token. Timed out after `token-timeout` seconds, fell back to interactive passphrase prompt, hung forever. **Root cause:** `softhsm-copy-tokens` was ordered `before cryptsetup-pre.target` but this didn't guarantee it ran before the specific `systemd-cryptsetup@cryptroot.service`. **Fix:** Changed to clevis-style ordering: `wantedBy = [ "systemd-cryptsetup@cryptroot.service" ]`, `before = [ "systemd-cryptsetup@cryptroot.service" "cryptsetup-pre.target" ]`, `DefaultDependencies = false`.
+
+---
+
+## 8a. Lessons Learned
+
+### Initrd service ordering patterns (from clevis, SSH, and boot test debugging)
+
+Three reference implementations in nixpkgs inform how initrd services should be ordered:
+
+**Clevis** (`luksroot.nix:1248-1284`): Per-device services that produce key files.
+- `wantedBy = [ "systemd-cryptsetup@${name}.service" ]` — tied to specific LUKS device
+- `before = [ "systemd-cryptsetup@${name}.service" "initrd-switch-root.target" "shutdown.target" ]`
+- `conflicts = [ "initrd-switch-root.target" "shutdown.target" ]`
+- `unitConfig.DefaultDependencies = "no"`
+
+**SSH** (`initrd-ssh.nix:336-358`): Long-running daemon needed throughout initrd.
+- `wantedBy = [ "initrd.target" ]`
+- `after = [ "network.target" "initrd-nixos-copy-secrets.service" ]`
+- `before = [ "shutdown.target" ]`, `conflicts = [ "shutdown.target" ]`
+- `unitConfig.DefaultDependencies = false`
+
+**Key takeaways applied to our module:**
+
+1. **`DefaultDependencies=false`** is mandatory for all initrd services that must run before cryptsetup. Without it, systemd adds implicit `After=sysinit.target` which creates a deadlock (sysinit depends on cryptsetup completing first).
+
+2. **Use `wantedBy` + `before` the specific `systemd-cryptsetup@<name>.service`** for per-device prep services (like clevis key decryption or softhsm token copying). For shared daemons (like pcscd) that serve all LUKS devices, `wantedBy = [ "cryptsetup-pre.target" ]` is correct because the generator orders `cryptsetup-pre.target` before all cryptsetup services.
+
+3. **Always add `conflicts` + `before` for `initrd-switch-root.target` and `shutdown.target`** on daemons. This ensures clean termination before the initrd transitions. Without these, a daemon may be killed abruptly by switch-root, potentially leaving state (lock files, sockets) that confuses the real root.
+
+4. **`Requires=<socket>`** should be set on socket-activated services to ensure the socket exists when the service starts.
+
+### `make-initrd-ng` dependency resolution
+
+`make-initrd-ng` (the Rust tool that populates the initrd) follows:
+- ELF `DT_NEEDED` entries (direct shared library dependencies)
+- RPATH/RUNPATH for library search paths
+- systemd's `.note.dlopen` metadata (JSON-encoded dlopen hints)
+
+It does **NOT** follow:
+- Plain `dlopen()` calls without `.note.dlopen` annotations
+- Nix store references in shell scripts
+- Symlinks from `buildEnv` into their target packages (these are followed at the filesystem level, but the target store paths must already be in the closure)
+
+**Practical impact:** Any library loaded via `dlopen()` at runtime must be listed explicitly in `storePaths`. This includes `libp11-kit.so.0` (loaded by `libcryptsetup-token-systemd-pkcs11.so`), `p11-kit-trust.so` (loaded by `libp11-kit`), and each PKCS#11 module `.so` (loaded by p11-kit from `/etc/pkcs11/modules/` config files).
+
+### Debugging initrd boot failures
+
+- **Kernel cmdline params** `systemd.log_level=debug` and `rd.systemd.log_level=debug` enable PID 1 debug logging to kmsg (visible on console). This is different from `SYSTEMD_LOG_LEVEL=debug` in `DefaultEnvironment`, which only affects spawned services.
+- **`boot.panic_on_fail`** (set by the NixOS test framework) causes immediate sysrq kernel crash on critical service failure, making errors hard to see. Debug logging must be enabled *before* the failure to capture the root cause.
+- **`token-timeout=N`** in crypttab controls how long systemd-cryptsetup waits for the security device before falling back to passphrase prompt. A short value (10s) speeds up debugging iterations.
+
+---
+
+## 8b. Open Issues
+
+### Real hardware testing (pcscd/CCID/USB path untested)
+
+The boot-cycle test uses softhsm (a software PKCS#11 token), which bypasses the entire pcscd/CCID/USB stack. The module configures pcscd + CCID drivers + USB kernel modules, but this path has never been exercised in a test. Potential issues:
+- USB device enumeration timing in initrd
+- CCID driver compatibility with the pluginEnv `buildEnv` symlinks
+- pcscd startup ordering with actual hardware reader detection
+
+Testing with a real YubiKey or with `vsmartcard-vpcd` (virtual smartcard for pcscd) would validate this path.
+
+### PIN delivery in real boot scenario
+
+The tests use `PIN=1234` env var via `DefaultEnvironment`, but real initrd boot needs a way to prompt for PIN. Options:
+- systemd's `ask_password_auto()` — plymouth prompt, console prompt, or `systemd-ask-password` agent (this is what systemd uses when `$PIN` is not set)
+- `pin-source=` in PKCS#11 URI (if systemd supports it — needs investigation)
+- Embedding PIN in crypttab options (insecure but functional for automated servers)
+
+For interactive desktop/laptop use, the default systemd behaviour (prompting via `ask_password_auto()`) should work without any `PIN=` env var. The test sets `PIN=` only because softhsm requires non-interactive PIN entry.
+
+---
+
+## 9. Risk Register
+
+| Risk | Status | Notes |
+|---|---|---|
+| Store paths missing dlopen'd deps | **Resolved** | `libp11-kit.so.0` and `p11-kit-trust.so` added explicitly to storePaths. Verified: boot test passes end-to-end. |
+| p11-kit can't find modules | **Resolved** | `/etc/pkcs11/modules/` via `contents` is correct. Verified in boot test. |
+| pcscd can't find CCID drivers | **Resolved** (untested with hardware) | `PCSCLITE_HP_DROPDIR` env var set via `pluginEnv`, matching `pcscd.nix` pattern |
+| pcscd ordering deadlock | **Resolved** | `wantedBy cryptsetup-pre.target` + `DefaultDependencies=false` on socket and service |
+| pcscd not cleaned up at switch-root | **Resolved** | Added `conflicts` + `before` for `initrd-switch-root.target` and `shutdown.target` (following clevis/SSH patterns) |
+| `--auto-exit` race | **Not a bug** | Exits 60s after last client disconnects, not on missing readers |
+| PIN delivery hangs enrollment/unlock | **Resolved** | `$PIN` env var required; `pin-value=` in URI is ignored by systemd |
+| YubiKey USB not enumerated in time | Open | `token-timeout` in crypttab provides wait window; untested with hardware |
+| nixpkgs `__structuredAttrs` bug | **Resolved** | Pinned flake.lock to pre-bug nixpkgs; upstream revert PR #505929 |
+
+---
+
+## 10. Running the Tests
+
+```bash
+# Eval tests (no VM, works everywhere):
+nix build .#checks.aarch64-darwin.initrd-pkcs11-eval-{pcscd-socket,pcscd-service,store-paths,p11-kit-module,reader-conf,kernel-modules,disabled,multi-module} --no-link
+
+# Single-boot VM test (works on aarch64-darwin/TCG):
+nix build .#checks.aarch64-darwin.initrd-pkcs11 --no-link --print-build-logs --show-trace
+
+# Boot-cycle VM test (works on aarch64-darwin/TCG with pinned nixpkgs):
+nix build .#checks.aarch64-darwin.initrd-pkcs11-boot --no-link --print-build-logs --show-trace
+```
+
+---
+
+## 11. Reference Links
+
+- **nixpkgs `luksroot.nix`:** `nixos/modules/system/boot/luksroot.nix` — storePaths (lines 1225-1231), crypttab generation (lines 590-611), assertions (lines 1057-1126)
+- **nixpkgs `initrd.nix`:** `nixos/modules/system/boot/systemd/initrd.nix` — makeInitrdNG (lines 129-136), storePaths option (lines 221-238), contents (lines 503-544), sockets/services (lines 367-379)
+- **`make-initrd-ng`:** `pkgs/build-support/kernel/make-initrd-ng/src/main.rs` — ELF parsing (lines 142-146), RPATH (lines 128-140), `.note.dlopen` (lines 100-126)
+- **nixpkgs `pcscd.nix`:** `nixos/modules/services/hardware/pcscd.nix` — pluginEnv (lines 15-18), PCSCLITE_HP_DROPDIR (line 115), ExecStart (lines 134-137)
+- **nixpkgs `pcsclite`:** `pkgs/by-name/pc/pcsclite/package.nix` — compile-time usbdropdir (line 49)
+- **nixpkgs `p11-kit`:** `pkgs/by-name/p1/p11-kit/package.nix` — `--sysconfdir=/etc` (line 55)
+- **nixpkgs `qemu-common.nix`:** `nixos/lib/qemu-common.nix` — QEMU binary/accel selection (line 46)
+- **nixpkgs `make-disk-image.nix`:** `nixos/lib/make-disk-image.nix` — UEFI disk image builder, uses `vmTools.runInLinuxVM`
+- **nixpkgs TPM2 test:** `nixos/tests/systemd-initrd-luks-tpm2.nix` — reference test pattern
+- **nixpkgs issue #265366:** Vanilla cryptsetup can't use systemd token plugins outside `systemd-cryptsetup`
+- **nixpkgs issue #121088:** pcscd scanning `/etc` without `-c` flag
+- **systemd source `pkcs11-util.c:262`:** `pkcs11_token_login()` — PIN handling via `$PIN` env var
+- **systemd source `openssl-util.c:1240-1398`:** `pkey_generate_volume_keys()` — RSA/EC dispatch
+- **systemd PR #29692:** URI `type=cert` vs `type=private` auto-conversion fix
+- **dracut `91pkcs11`:** https://github.com/dracutdevs/dracut/commit/83ea8cf
+- **Nitrokey/Gentoo guide:** https://vtimofeenko.com/posts/unlocking-luks2-with-x509-nitrokey-during-boot/
+- **Lennart Poettering's blog:** https://0pointer.net/blog/unlocking-luks2-volumes-with-tpm2-fido2-pkcs11-security-hardware-on-systemd-248.html
+
+---
+
+## 12. Glossary
+
+- **PIV:** Personal Identity Verification — YubiKey smart card applet for X.509 crypto
+- **PKCS#11:** Standard API for cryptographic tokens. `libykcs11.so` implements it for YubiKey PIV.
+- **p11-kit:** Middleware that loads PKCS#11 modules from `/etc/pkcs11/modules/`
+- **pcscd:** PC/SC Smart Card Daemon — manages USB smart card reader communication
+- **CCID:** USB device class for smart card readers; the `ccid` package provides the userspace pcscd driver (NOT a kernel module)
+- **`cryptsetup-pre.target`:** systemd target running before LUKS volumes are opened; services needed for unlock should be wanted by this
+- **`make-initrd-ng`:** Rust tool that populates the initrd filesystem, following ELF dependencies and `.note.dlopen` metadata
+- **`libcryptsetup-token-systemd-pkcs11.so`:** Cryptsetup token plugin shipped with systemd; loaded by `libcryptsetup` when processing a PKCS#11 token entry in the LUKS2 header
