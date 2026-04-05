@@ -47,15 +47,17 @@ let
         fetch_routers_in_parallel = false;
         max_worker_threads = 8;
       };
-      defaultRouterSettings.settings = {
-        health = true;
-        bgp = false;
-        custom_labels = null;
-      };
-      routers."home-router".settings = {
-        hostname = "192.168.88.1";
-        port = 8728;
-        bgp = true;
+      routers = {
+        default.settings = {
+          health = true;
+          bgp = false;
+          custom_labels = null;
+        };
+        "home-router".settings = {
+          hostname = "192.168.88.1";
+          port = 8728;
+          bgp = true;
+        };
       };
     };
   };
@@ -223,11 +225,11 @@ in
     )
     (lib.assertMsg
       (lib.hasInfix "health = True" sA.services.mktxp._routerConfigText)
-      "health=true from defaultRouterSettings missing"
+      "health=true from routers.default missing"
     )
     (lib.assertMsg
       (lib.hasInfix "bgp = False" sA.services.mktxp._routerConfigText)
-      "bgp=false from defaultRouterSettings missing"
+      "bgp=false from routers.default missing"
     )
     (lib.assertMsg
       (lib.hasInfix "custom_labels = None" sA.services.mktxp._routerConfigText)

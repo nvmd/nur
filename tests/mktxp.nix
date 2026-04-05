@@ -32,7 +32,7 @@ pkgs.testers.runNixOSTest {
 
         # Minimal per-router defaults: disable collectors that make no sense
         # in a VM with no attached RouterOS hardware.
-        defaultRouterSettings.settings = {
+        routers.default.settings = {
           health = false;
           installed_packages = false;
           dhcp = false;

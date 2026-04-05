@@ -51,10 +51,7 @@ let
   # Exposed via _globalConfigText / _routerConfigText for eval tests.
   globalConfText = toINI { MKTXP = cfg.settings; };
 
-  routerConfText = toINI (
-    { default = cfg.defaultRouterSettings.settings; }
-    // mapAttrs (_: r: r.settings) cfg.routers
-  );
+  routerConfText = toINI (mapAttrs (_: r: r.settings) cfg.routers);
 
   # Target-system store derivations — referenced by BindReadOnlyPaths.
   globalConf = pkgs.writeText "_mktxp.conf" globalConfText;
@@ -144,23 +141,6 @@ in
       '';
     };
 
-    defaultRouterSettings = mkOption {
-      type = routerSubmoduleType;
-      default = { };
-      description = ''
-        Default settings applied to every router unless overridden in
-        {option}`services.mktxp.routers`. Written as the `[default]` section of
-        `mktxp.conf`.
-
-        ```nix
-        services.mktxp.defaultRouterSettings.settings = {
-          health = true;
-          bgp = false;
-        };
-        ```
-      '';
-    };
-
     routers = mkOption {
       type = types.attrsOf routerSubmoduleType;
       default = { };
@@ -168,11 +148,19 @@ in
         Per-router configurations.
         Each attribute name becomes an INI section header in `mktxp.conf`
         (e.g. `routers."home-router"` → `[home-router]`).
-        Values in `.settings` override {option}`defaultRouterSettings.settings`
-        for that router.
+
+        Default configuration applied to every router can be specified in
+        {option}`services.mktxp.routers.default`, it's active unless overridden
+        by the router's individual configuration
+        {option}`services.mktxp.routers.<name>`.
+        Written as the `[default]` section of `mktxp.conf`.
       '';
       example = literalExpression ''
         {
+          default.settings = {
+            health = true;
+            bgp = false;
+          };
           "home-router".settings = {
             credentials_file = config.sops.secrets."mktxp/home-router".path;
             hostname = "192.168.88.1";
