@@ -51,7 +51,7 @@
         # Prefix every eval-test name for easy identification.
         lib.mapAttrs' (n: v: lib.nameValuePair "mktxp-eval-${n}" v) evalTests
         // lib.mapAttrs' (n: v: lib.nameValuePair "initrd-pkcs11-eval-${n}" v) initrdPkcs11EvalTests
-        // lib.optionalAttrs pkgs.stdenv.isLinux {
+        // {
           # Full NixOS VM integration tests — Linux builders only.
           mktxp = import ./tests/mktxp.nix { inherit pkgs self; };
           # Single-boot: enroll + attach (no reboot, no UEFI boot loader).
