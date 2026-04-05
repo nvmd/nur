@@ -29,24 +29,23 @@ let
   # INI generation — Python-style literals required by configobj
   # ---------------------------------------------------------------------------
 
-  # mktxp uses configobj, which parses Python literals for booleans and None.
-  toConfValue =
-    v:
-    if v == null then
-      "None"
-    else if v == true then
-      "True"
-    else if v == false then
-      "False"
-    else if builtins.isString v && v == "" then
-      "\"\""
-    else
-      toString v;
-
-  # lib.generators.toINI with a custom mkKeyValue that emits Python literals.
-  toINI = lib.generators.toINI {
+  # emits Python literals so that mktxp's `configobj` can parse the config
+  toINI = lib.generators.toINI (let
+    toConfValue =
+      v:
+      if v == null then
+        "None"
+      else if v == true then
+        "True"
+      else if v == false then
+        "False"
+      else if builtins.isString v && v == "" then
+        "\"\""
+      else
+        toString v;
+  in {
     mkKeyValue = k: v: "${k} = ${toConfValue v}";
-  };
+  });
 
   # Plain Nix strings — host-portable, no store path context.
   # Exposed via _globalConfigText / _routerConfigText for eval tests.
