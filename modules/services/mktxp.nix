@@ -82,21 +82,13 @@ let
       };
       default = { };
       description = ''
-        Options written verbatim to the router's INI section. All keys map
-        directly to mktxp router configuration options; see the
-        [upstream documentation](https://github.com/akpw/mktxp#configuration)
+        RFC-42-conformant configuration: All keys map directly to
+        router configuration options without additional checks.
+
+        See the [upstream documentation](https://github.com/akpw/mktxp#configuration)
         for the full list.
 
-        To supply credentials via
-        [sops-nix](https://github.com/Mic92/sops-nix) or
-        [agenix](https://github.com/ryantm/agenix), set the
-        `credentials_file` key to the secret's runtime path:
-
-        ```nix
-        sops.secrets."mktxp/home-router".owner = config.services.mktxp.user;
-        services.mktxp.routers."home-router".settings.credentials_file =
-          config.sops.secrets."mktxp/home-router".path;
-        ```
+        Credentials file path can be supplied with `credentials_file`.
       '';
     };
   };
@@ -129,11 +121,15 @@ in
         ]);
       default = { };
       description = ''
-        Global MKTXP settings written to the `[MKTXP]` section of `_mktxp.conf`.
-        Keys map directly to mktxp configuration options; see the
-        [upstream documentation](https://github.com/akpw/mktxp#configuration)
-        for the full list. Notable options:
+        Global MKTXP settings.
+        RFC-42-conformant configuration: Keys map directly to configuration
+        options written to the `[MKTXP]` section of `_mktxp.conf` without
+        additional checks.
 
+        See the [upstream documentation](https://github.com/akpw/mktxp#configuration)
+        for the full list.
+        
+        Notable options:
         - `listen` — socket address(es) to serve metrics on (default: `"0.0.0.0:49090"`)
         - `fetch_routers_in_parallel` — parallel scraping (default: `false`)
         - `verbose_mode` — debug logging (default: `false`)
@@ -169,8 +165,9 @@ in
       type = types.attrsOf routerSubmoduleType;
       default = { };
       description = ''
-        Per-router configurations. Each attribute name becomes an INI section
-        header in `mktxp.conf` (e.g. `routers."home-router"` → `[home-router]`).
+        Per-router configurations.
+        Each attribute name becomes an INI section header in `mktxp.conf`
+        (e.g. `routers."home-router"` → `[home-router]`).
         Values in `.settings` override {option}`defaultRouterSettings.settings`
         for that router.
       '';
