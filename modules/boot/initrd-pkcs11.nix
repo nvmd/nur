@@ -88,9 +88,8 @@ in
         "${initrdSystemdCfg.package}/lib/cryptsetup/libcryptsetup-token-systemd-pkcs11.so"
         "${pkgs.p11-kit}/lib/libp11-kit.so.0"
 
-        # p11-kit-proxy is the "virtual" module that aggregates all
-        # registered PKCS#11 modules; p11-kit-trust provides the
-        # trust-policy module.  Both are dlopen'd by libp11-kit.
+        # p11-kit-trust provides the trust-policy module and is
+        # dlopen'd by libp11-kit at runtime.
         "${pkgs.p11-kit}/lib/pkcs11/p11-kit-trust.so"
 
         # pcscd binary + CCID drivers
@@ -142,8 +141,21 @@ in
 
     boot.initrd.systemd.services.pcscd = {
       description = "PC/SC Smart Card Daemon (initrd)";
+      # Requires + after matches the upstream pcscd.service unit shipped
+      # by the pcsclite project. Not sure if `requires` is needed in initrd
+      requires = [ "pcscd.socket" ];
       after = [ "pcscd.socket" ];
-      before = [ "cryptsetup-pre.target" ];
+      before = [
+        "cryptsetup-pre.target"
+        # Clean shutdown before switch-root — following the pattern
+        # from initrd-ssh.nix and clevis in luksroot.nix.
+        "initrd-switch-root.target"
+        "shutdown.target"
+      ];
+      conflicts = [
+        "initrd-switch-root.target"
+        "shutdown.target"
+      ];
       unitConfig = {
         DefaultDependencies = false;
       };
