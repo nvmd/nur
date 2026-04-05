@@ -49,13 +49,7 @@ let
 
   # Plain Nix strings — host-portable, no store path context.
   # Exposed via _globalConfigText / _routerConfigText for eval tests.
-  #
-  # KeyError: 'compact_default_conf_values'
-  # compact_default_conf_values is always injected because mktxp's
-  # _config_entry_reader does an unguarded as_bool() on this key — it
-  # requires the key to be present in [MKTXP] and crashes with KeyError
-  # if it is absent.  Users can still override it via settings.
-  globalConfText = toINI { MKTXP = { compact_default_conf_values = false; } // cfg.settings; };
+  globalConfText = toINI { MKTXP = cfg.settings; };
 
   routerConfText = toINI (
     { default = cfg.defaultRouterSettings.settings; }
@@ -247,6 +241,14 @@ in
         '';
       }
     ];
+
+    services.mktxp.settings = {
+      # workaround for `KeyError: 'compact_default_conf_values'`
+      # compact_default_conf_values is always injected because mktxp's
+      # _config_entry_reader does an unguarded as_bool() on this key,
+      # crashing when it's absent
+      compact_default_conf_values = lib.mkDefault false;
+    };
 
     users.users = optionalAttrs (cfg.user == "mktxp") {
       mktxp = {
