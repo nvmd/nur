@@ -76,15 +76,22 @@ in
     ];
 
     # --- Store paths ---
-    # make-initrd-ng automatically follows direct ELF shared-library
-    # dependencies, so transitive .so deps of the token plugin (like
-    # libp11-kit) are pulled in.  However, dlopen'd libraries (the PKCS#11
-    # module loaded by p11-kit at runtime via config file) must be listed
-    # explicitly.
+    # make-initrd-ng follows direct ELF shared-library dependencies but
+    # NOT libraries loaded via dlopen() at runtime.  Both the systemd
+    # PKCS#11 token plugin and the PKCS#11 modules themselves are
+    # dlopen'd, so they must be listed explicitly.
     boot.initrd.systemd.storePaths =
       [
-        # The cryptsetup token plugin shipped with systemd
+        # The cryptsetup token plugin shipped with systemd.
+        # It dlopen's libp11-kit.so.0 at runtime to enumerate PKCS#11
+        # modules, so p11-kit must also be listed explicitly.
         "${initrdSystemdCfg.package}/lib/cryptsetup/libcryptsetup-token-systemd-pkcs11.so"
+        "${pkgs.p11-kit}/lib/libp11-kit.so.0"
+
+        # p11-kit-proxy is the "virtual" module that aggregates all
+        # registered PKCS#11 modules; p11-kit-trust provides the
+        # trust-policy module.  Both are dlopen'd by libp11-kit.
+        "${pkgs.p11-kit}/lib/pkcs11/p11-kit-trust.so"
 
         # pcscd binary + CCID drivers
         "${pkgs.pcsclite}/bin/pcscd"
