@@ -105,9 +105,9 @@ let
     boot.initrd.systemd.pkcs11.enable = true;
     boot.initrd.systemd.pkcs11.pcscd.readerConf = ''
       FRIENDLYNAME "Virtual PCD"
-      DEVICENAME   /dev/null:0x8C4B
+      DEVICENAME   /dev/null:0x8C7B
       LIBPATH      /nix/store/fake-vpcd/lib/libifdvpcd.so
-      CHANNELID    0x8C4B
+      CHANNELID    0x8C7B
     '';
   };
 
@@ -227,12 +227,12 @@ in
   ];
 
   # --------------------------------------------------------------------------
-  # 5. reader.conf in initrd contents
+  # 5. reader.conf.d directory in initrd contents (pcsclite 2.x directory scan)
   # --------------------------------------------------------------------------
   reader-conf = assertEval "reader-conf" [
     (lib.assertMsg
-      (cfgA.boot.initrd.systemd.contents ? "/etc/reader.conf")
-      "initrd contents must include /etc/reader.conf"
+      (cfgA.boot.initrd.systemd.contents ? "/etc/reader.conf.d")
+      "initrd contents must include /etc/reader.conf.d (pcsclite 2.x directory)"
     )
   ];
 
@@ -345,21 +345,22 @@ in
   ];
 
   # --------------------------------------------------------------------------
-  # 11. pcscd.readerConf — content flows into /etc/reader.conf in initrd
+  # 11. pcscd.readerConf — content flows into /etc/reader.conf.d in initrd
+  #     (pcsclite 2.x requires a directory, not a single file)
   # --------------------------------------------------------------------------
   pcscd-reader-conf = assertEval "pcscd-reader-conf" [
     (lib.assertMsg
       (cfgA.boot.initrd.systemd.pkcs11.pcscd.readerConf == "")
       "pcscd.readerConf must default to empty string"
     )
-    # /etc/reader.conf must exist in initrd contents regardless of readerConf value
+    # /etc/reader.conf.d must exist in initrd contents regardless of readerConf value
     (lib.assertMsg
-      (cfgA.boot.initrd.systemd.contents ? "/etc/reader.conf")
-      "/etc/reader.conf must be present in initrd contents (default scenario)"
+      (cfgA.boot.initrd.systemd.contents ? "/etc/reader.conf.d")
+      "/etc/reader.conf.d must be present in initrd contents (default scenario)"
     )
     (lib.assertMsg
-      (cfgF.boot.initrd.systemd.contents ? "/etc/reader.conf")
-      "/etc/reader.conf must be present in initrd contents (vpcd scenario)"
+      (cfgF.boot.initrd.systemd.contents ? "/etc/reader.conf.d")
+      "/etc/reader.conf.d must be present in initrd contents (vpcd scenario)"
     )
     # The option value itself must round-trip correctly
     (lib.assertMsg
@@ -370,11 +371,10 @@ in
       (lib.hasInfix "libifdvpcd.so" cfgF.boot.initrd.systemd.pkcs11.pcscd.readerConf)
       "pcscd.readerConf must retain LIBPATH content"
     )
-    # The reader.conf is generated via pkgs.writeText (source derivation, not
-    # inline text), so we verify the source attribute is set, not .text.
+    # The reader.conf.d directory is built via pkgs.runCommand (source derivation).
     (lib.assertMsg
-      (cfgF.boot.initrd.systemd.contents."/etc/reader.conf" ? source)
-      "/etc/reader.conf in initrd contents must use .source (writeText derivation)"
+      (cfgF.boot.initrd.systemd.contents."/etc/reader.conf.d" ? source)
+      "/etc/reader.conf.d in initrd contents must use .source (runCommand derivation)"
     )
   ];
 }
