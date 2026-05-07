@@ -15,9 +15,10 @@ let
     paths = map (p: "${p}/pcsc/drivers") cfg.pcscd.plugins;
   };
 
-  # Empty reader.conf — pcscd auto-detects hotplug CCID readers, so no
-  # static reader configuration is needed.
-  readerConf = pkgs.writeText "reader.conf" "";
+  # reader.conf — empty by default (pcscd auto-detects hotplug CCID readers
+  # via PCSCLITE_HP_DROPDIR); populated when pcscd.readerConf is set (e.g.
+  # for virtual/serial readers like vsmartcard-vpcd).
+  readerConf = pkgs.writeText "reader.conf" cfg.pcscd.readerConf;
 in
 {
   options.boot.initrd.systemd.pkcs11 = {
@@ -58,7 +59,45 @@ in
         description = ''
           Smartcard reader driver packages for pcscd.
           The default `ccid` covers USB CCID-class readers including
-          YubiKeys.
+          YubiKeys.  These are hotplug drivers discovered via
+          `PCSCLITE_HP_DROPDIR`.
+
+          For non-hotplug (serial/virtual) readers such as
+          `vsmartcard-vpcd`, use `pcscd.readerConf` instead.
+        '';
+      };
+
+      readerConf = lib.mkOption {
+        type = lib.types.lines;
+        default = "";
+        example = lib.literalExpression ''
+          '''
+            FRIENDLYNAME "Virtual PCD"
+            DEVICENAME   /dev/null:0x8C4B
+            LIBPATH      ''${pkgs.vsmartcard-vpcd}/var/lib/pcsc/drivers/serial/libifdvpcd.so
+            CHANNELID    0x8C4B
+          '''
+        '';
+        description = ''
+          Additional content for pcscd's `reader.conf` in the initrd.
+
+          Used for non-hotplug (serial/virtual) readers that are not
+          discovered via udev.  Each entry follows the
+          {manpage}`reader.conf(5)` format:
+
+          ```
+          FRIENDLYNAME "<name>"
+          DEVICENAME   <address>
+          LIBPATH      <path-to-ifd-handler.so>
+          CHANNELID    <channel>
+          ```
+
+          Hotplug USB readers (e.g. YubiKey CCID) are configured
+          automatically via `pcscd.plugins` — this option is only
+          needed for virtual or serial readers.
+
+          Any library referenced by LIBPATH must also be added to
+          `boot.initrd.systemd.storePaths`.
         '';
       };
     };
