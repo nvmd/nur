@@ -15,10 +15,14 @@ let
     paths = map (p: "${p}/pcsc/drivers") cfg.pcscd.plugins;
   };
 
-  # reader.conf — empty by default (pcscd auto-detects hotplug CCID readers
-  # via PCSCLITE_HP_DROPDIR); populated when pcscd.readerConf is set (e.g.
-  # for virtual/serial readers like vsmartcard-vpcd).
-  readerConf = pkgs.writeText "reader.conf" cfg.pcscd.readerConf;
+  # pcsclite 2.x changed from a single reader.conf file to a reader.conf.d
+  # directory (opendir/readdir scan for *.conf files).  Create a directory
+  # derivation so the -c argument to pcscd is a directory, not a file.
+  readerConf = pkgs.writeText "readers.conf" cfg.pcscd.readerConf;
+  readerConfDir = pkgs.runCommand "pcscd-reader.conf.d" { } ''
+    mkdir "$out"
+    cp ${readerConf} "$out/readers.conf"
+  '';
 in
 {
   options.boot.initrd.systemd.pkcs11 = {
@@ -73,9 +77,9 @@ in
         example = lib.literalExpression ''
           '''
             FRIENDLYNAME "Virtual PCD"
-            DEVICENAME   /dev/null:0x8C4B
+            DEVICENAME   /dev/null:0x8C7B
             LIBPATH      ''${pkgs.vsmartcard-vpcd}/var/lib/pcsc/drivers/serial/libifdvpcd.so
-            CHANNELID    0x8C4B
+            CHANNELID    0x8C7B
           '''
         '';
         description = ''
@@ -172,8 +176,9 @@ in
         )
         cfg.modules
       // {
-        # pcscd expects a reader.conf even if empty.
-        "/etc/reader.conf".source = readerConf;
+        # pcsclite 2.x scans a reader.conf.d directory (opendir/readdir for
+        # *.conf files) — passing a single file to -c is silently ignored.
+        "/etc/reader.conf.d".source = readerConfDir;
       };
 
     # --- pcscd socket + service in initrd ---
@@ -230,7 +235,7 @@ in
         #    doesn't linger after LUKS unlock / switch-root
         # -c (--config): explicit config path prevents pcscd from
         #    scanning all of /etc looking for reader.conf (nixpkgs#121088)
-        ExecStart = "${pkgs.pcsclite}/bin/pcscd -f -x -c ${readerConf}";
+        ExecStart = "${pkgs.pcsclite}/bin/pcscd -f -x -c ${readerConfDir}";
         Type = "simple";
       };
       environment = {
