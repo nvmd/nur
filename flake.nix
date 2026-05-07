@@ -58,6 +58,8 @@
           initrd-pkcs11 = import ./tests/initrd-pkcs11.nix { inherit pkgs self; };
           # Full boot-cycle: enroll → reboot → initrd unlocks LUKS.
           initrd-pkcs11-boot = import ./tests/initrd-pkcs11-boot.nix { inherit pkgs self; };
+          # pcscd infrastructure smoke test: vpcd driver loaded, virtual reader detected.
+          initrd-pkcs11-pcscd = import ./tests/initrd-pkcs11-pcscd.nix { inherit pkgs self; };
         }
       );
     };
