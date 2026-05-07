@@ -97,11 +97,26 @@ let
     };
   };
 
+  # ---------------------------------------------------------------------------
+  # Scenario F: pcscd.readerConf set — content must appear in reader.conf
+  # ---------------------------------------------------------------------------
+  scenarioF = evalPkcs11 {
+    boot.initrd.systemd.enable = true;
+    boot.initrd.systemd.pkcs11.enable = true;
+    boot.initrd.systemd.pkcs11.pcscd.readerConf = ''
+      FRIENDLYNAME "Virtual PCD"
+      DEVICENAME   /dev/null:0x8C4B
+      LIBPATH      /nix/store/fake-vpcd/lib/libifdvpcd.so
+      CHANNELID    0x8C4B
+    '';
+  };
+
   cfgA = scenarioA.config;
   cfgB = scenarioB.config;
   cfgC = scenarioC.config;
   cfgD = scenarioD.config;
   cfgE = scenarioE.config;
+  cfgF = scenarioF.config;
 in
 {
   # --------------------------------------------------------------------------
@@ -326,6 +341,40 @@ in
     (lib.assertMsg
       (!(builtins.any (w: lib.hasInfix "pkcs11-uri" w) cfgE.warnings))
       "no warning must fire when a LUKS device has pkcs11-uri= in crypttabExtraOpts"
+    )
+  ];
+
+  # --------------------------------------------------------------------------
+  # 11. pcscd.readerConf — content flows into /etc/reader.conf in initrd
+  # --------------------------------------------------------------------------
+  pcscd-reader-conf = assertEval "pcscd-reader-conf" [
+    (lib.assertMsg
+      (cfgA.boot.initrd.systemd.pkcs11.pcscd.readerConf == "")
+      "pcscd.readerConf must default to empty string"
+    )
+    # /etc/reader.conf must exist in initrd contents regardless of readerConf value
+    (lib.assertMsg
+      (cfgA.boot.initrd.systemd.contents ? "/etc/reader.conf")
+      "/etc/reader.conf must be present in initrd contents (default scenario)"
+    )
+    (lib.assertMsg
+      (cfgF.boot.initrd.systemd.contents ? "/etc/reader.conf")
+      "/etc/reader.conf must be present in initrd contents (vpcd scenario)"
+    )
+    # The option value itself must round-trip correctly
+    (lib.assertMsg
+      (lib.hasInfix "Virtual PCD" cfgF.boot.initrd.systemd.pkcs11.pcscd.readerConf)
+      "pcscd.readerConf must retain FRIENDLYNAME content"
+    )
+    (lib.assertMsg
+      (lib.hasInfix "libifdvpcd.so" cfgF.boot.initrd.systemd.pkcs11.pcscd.readerConf)
+      "pcscd.readerConf must retain LIBPATH content"
+    )
+    # The reader.conf is generated via pkgs.writeText (source derivation, not
+    # inline text), so we verify the source attribute is set, not .text.
+    (lib.assertMsg
+      (cfgF.boot.initrd.systemd.contents."/etc/reader.conf" ? source)
+      "/etc/reader.conf in initrd contents must use .source (writeText derivation)"
     )
   ];
 }
