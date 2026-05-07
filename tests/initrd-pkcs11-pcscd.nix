@@ -64,6 +64,15 @@ pkgs.testers.runNixOSTest {
       # It must be in storePaths explicitly because make-initrd-ng does not
       # follow Nix store references inside text files (reader.conf).
       boot.initrd.systemd.storePaths = [ vpcdLib ];
+
+      # The smoke test has no LUKS device, so cryptsetup-pre.target is never
+      # activated in the initrd.  Without it, pcscd's wantedBy=cryptsetup-pre.target
+      # never fires.  Pull pcscd into initrd.target so it still starts and
+      # exercises the reader-detection path.
+      #
+      # In a real deployment, LUKS devices with pkcs11-uri=auto trigger
+      # cryptsetup-pre.target automatically — this override is test-only.
+      boot.initrd.systemd.services.pcscd.wantedBy = [ "initrd.target" ];
     };
 
   testScript = ''
