@@ -5,11 +5,11 @@
 # the LUKS volume automatically during initrd — the same path a real YubiKey
 # would take.
 #
-# REQUIRES: a host with KVM support.  Without KVM, QEMU falls back to TCG
-# and the UEFI disk image builder + RSA crypto are prohibitively slow.
+# Works without KVM (pure TCG); expect ~53 s on aarch64-darwin.  The UEFI
+# disk image builder and RSA crypto are slow under TCG, but complete within
+# the test timeout.
 #
-# See also: tests/initrd-pkcs11.nix for a lighter single-boot test that
-# works (slowly) without KVM.
+# See also: tests/initrd-pkcs11.nix for a lighter single-boot test.
 #
 # Architecture note: the outer `pkgs` is the *host* platform (e.g.
 # aarch64-darwin on macOS).  Inside `nodes.machine`, `pkgs` is the *VM*

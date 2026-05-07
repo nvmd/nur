@@ -75,6 +75,26 @@ in
       }
     ];
 
+    # Warn when LUKS devices are configured but none have pkcs11-uri= in
+    # crypttabExtraOpts — systemd-cryptsetup only tries the token path when
+    # the crypttab entry carries pkcs11-uri=auto (or an explicit URI), exactly
+    # like TPM2 requires tpm2-device=auto.  Without it the token is silently
+    # ignored and the volume falls back to passphrase prompt.
+    warnings = lib.optional (
+      config.boot.initrd.luks.devices != { }
+      && !(lib.any
+        (device: lib.any (opt: lib.hasPrefix "pkcs11-uri=" opt) device.crypttabExtraOpts)
+        (lib.attrValues config.boot.initrd.luks.devices))
+    ) ''
+      boot.initrd.systemd.pkcs11 is enabled, but none of the configured LUKS
+      devices have a 'pkcs11-uri=' option in crypttabExtraOpts.
+      systemd-cryptsetup will not attempt PKCS#11 token unlock.
+      Add the following to each volume you want unlocked via a PKCS#11 token:
+
+        boot.initrd.luks.devices."<name>".crypttabExtraOpts =
+          [ "pkcs11-uri=auto" "token-timeout=30" ];
+    '';
+
     # --- Store paths ---
     # make-initrd-ng follows direct ELF shared-library dependencies but
     # NOT libraries loaded via dlopen() at runtime.  Both the systemd
@@ -142,9 +162,14 @@ in
     boot.initrd.systemd.services.pcscd = {
       description = "PC/SC Smart Card Daemon (initrd)";
       # Requires + after matches the upstream pcscd.service unit shipped
-      # by the pcsclite project. Not sure if `requires` is needed in initrd
+      # by the pcsclite project.
       requires = [ "pcscd.socket" ];
       after = [ "pcscd.socket" ];
+      # Start pcscd eagerly so it has time to probe the reader before
+      # systemd-cryptsetup connects via libpcsclite.  Socket activation
+      # alone would start pcscd only when the first client connects,
+      # which creates a race with reader enumeration.
+      wantedBy = [ "cryptsetup-pre.target" ];
       before = [
         "cryptsetup-pre.target"
         # Clean shutdown before switch-root — following the pattern
@@ -175,9 +200,12 @@ in
     };
 
     # --- Kernel modules for USB smartcard readers ---
+    # Force-loaded (not just available) so that the USB host controller and HID
+    # driver are present before pcscd probes for readers — even on systems where
+    # the root FS is on NVMe/SATA and nothing else triggers xhci udev autoload.
     # Note: "ccid" is a userspace pcscd driver (pkgs.ccid), NOT a kernel
     # module — it is handled via pluginEnv / PCSCLITE_HP_DROPDIR above.
-    boot.initrd.availableKernelModules = [
+    boot.initrd.kernelModules = [
       "usbhid"
       "xhci_pci"
       "xhci_hcd"

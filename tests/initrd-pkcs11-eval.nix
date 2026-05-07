@@ -71,9 +71,37 @@ let
     };
   };
 
+  # ---------------------------------------------------------------------------
+  # Scenario D: pkcs11 enabled, LUKS device configured but NO pkcs11-uri=
+  # Expected: a NixOS warning fires reminding the user to add pkcs11-uri=auto.
+  # ---------------------------------------------------------------------------
+  scenarioD = evalPkcs11 {
+    boot.initrd.systemd.enable = true;
+    boot.initrd.systemd.pkcs11.enable = true;
+    boot.initrd.luks.devices.cryptroot = {
+      device = "/dev/sda2";
+      # crypttabExtraOpts intentionally omitted — warning should fire
+    };
+  };
+
+  # ---------------------------------------------------------------------------
+  # Scenario E: pkcs11 enabled, LUKS device with pkcs11-uri=auto set correctly
+  # Expected: no warning.
+  # ---------------------------------------------------------------------------
+  scenarioE = evalPkcs11 {
+    boot.initrd.systemd.enable = true;
+    boot.initrd.systemd.pkcs11.enable = true;
+    boot.initrd.luks.devices.cryptroot = {
+      device = "/dev/sda2";
+      crypttabExtraOpts = [ "pkcs11-uri=auto" "token-timeout=30" ];
+    };
+  };
+
   cfgA = scenarioA.config;
   cfgB = scenarioB.config;
   cfgC = scenarioC.config;
+  cfgD = scenarioD.config;
+  cfgE = scenarioE.config;
 in
 {
   # --------------------------------------------------------------------------
@@ -109,6 +137,10 @@ in
     (lib.assertMsg
       (builtins.elem "pcscd.socket" cfgA.boot.initrd.systemd.services.pcscd.after)
       "pcscd service must be after pcscd.socket"
+    )
+    (lib.assertMsg
+      (builtins.elem "cryptsetup-pre.target" cfgA.boot.initrd.systemd.services.pcscd.wantedBy)
+      "pcscd service must be wantedBy cryptsetup-pre.target (eager start)"
     )
     (lib.assertMsg
       (builtins.elem "cryptsetup-pre.target" cfgA.boot.initrd.systemd.services.pcscd.before)
@@ -190,16 +222,20 @@ in
   ];
 
   # --------------------------------------------------------------------------
-  # 6. Kernel modules — USB HID/host controllers present, no "ccid"
+  # 6. Kernel modules — USB HID/host controllers force-loaded, no "ccid"
   # --------------------------------------------------------------------------
   kernel-modules = assertEval "kernel-modules" [
     (lib.assertMsg
-      (builtins.elem "usbhid" cfgA.boot.initrd.availableKernelModules)
-      "availableKernelModules must include usbhid"
+      (builtins.elem "usbhid" cfgA.boot.initrd.kernelModules)
+      "kernelModules must include usbhid"
     )
     (lib.assertMsg
-      (builtins.elem "xhci_pci" cfgA.boot.initrd.availableKernelModules)
-      "availableKernelModules must include xhci_pci"
+      (builtins.elem "xhci_pci" cfgA.boot.initrd.kernelModules)
+      "kernelModules must include xhci_pci"
+    )
+    (lib.assertMsg
+      (!(builtins.elem "ccid" cfgA.boot.initrd.kernelModules))
+      "kernelModules must NOT include ccid (it's a userspace driver, not a kernel module)"
     )
     (lib.assertMsg
       (!(builtins.elem "ccid" cfgA.boot.initrd.availableKernelModules))
@@ -272,4 +308,24 @@ in
         "storePaths must include opensc-pkcs11.so"
       )
     ];
+
+  # --------------------------------------------------------------------------
+  # 9. Warning fires when LUKS device is present but pkcs11-uri= is missing
+  # --------------------------------------------------------------------------
+  missing-pkcs11-uri = assertEval "missing-pkcs11-uri" [
+    (lib.assertMsg
+      (builtins.any (w: lib.hasInfix "pkcs11-uri" w) cfgD.warnings)
+      "a NixOS warning must fire when LUKS devices exist but none have pkcs11-uri= in crypttabExtraOpts"
+    )
+  ];
+
+  # --------------------------------------------------------------------------
+  # 10. No warning when at least one LUKS device has pkcs11-uri= set
+  # --------------------------------------------------------------------------
+  pkcs11-uri-present = assertEval "pkcs11-uri-present" [
+    (lib.assertMsg
+      (!(builtins.any (w: lib.hasInfix "pkcs11-uri" w) cfgE.warnings))
+      "no warning must fire when a LUKS device has pkcs11-uri= in crypttabExtraOpts"
+    )
+  ];
 }
