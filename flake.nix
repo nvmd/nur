@@ -57,7 +57,6 @@
           # Single-boot: enroll + attach (no reboot, no UEFI boot loader).
           initrd-pkcs11 = import ./tests/initrd-pkcs11.nix { inherit pkgs self; };
           # Full boot-cycle: enroll → reboot → initrd unlocks LUKS.
-          # Requires KVM; very slow or hangs under pure TCG emulation.
           initrd-pkcs11-boot = import ./tests/initrd-pkcs11-boot.nix { inherit pkgs self; };
         }
       );
