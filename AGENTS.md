@@ -5,3 +5,4 @@
   * library functions
 * The repository is aimed to be compatible with and to be accessible via [The Nix User Repository (NUR)](https://github.com/nix-community/NUR), having the standard directory structure for the NUR repositories
 * Please run the tooling you need using `nix-shell` or `nix shell`, `nix develop`, or `nix run`
+* After the completion of your task please always check that the tests pass and there're no regressions. You can do that, for example, with `nix flake check --verbose --print-build-logs`
