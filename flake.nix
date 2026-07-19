@@ -26,6 +26,23 @@
       #   imports = [ nur.nixosModules.mktxp ];
       nixosModules = import ./modules/default.nix;
 
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = pkgss.${system}.nixpkgs;
+        in
+        {
+          default = pkgs.mkShell {
+            name = "nvmd-nur";
+            nativeBuildInputs = with pkgs; [
+              nixd
+              nixfmt
+              nix-output-monitor
+            ];
+          };
+        }
+      );
+
       # Per-system checks, flattened from the nested test registry in ./tests.
       # Every check is named by its attribute path joined with `-`, e.g.
       # * mktxp-eval-default-user  (eval tests, every platform)
