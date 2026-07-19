@@ -6,12 +6,16 @@
     let
       lib = nixpkgs.lib;
       forAllSystems = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
+
+      pkgss = forAllSystems (system: {
+        nixpkgs = import nixpkgs { inherit system; };
+      });
     in
     {
       legacyPackages = forAllSystems (
         system:
         import ./default.nix {
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = pkgss.${system}.nixpkgs;
         }
       );
       packages = forAllSystems (
@@ -30,7 +34,7 @@
         system:
         let
           tests = import ./tests {
-            pkgs = nixpkgs.legacyPackages.${system};
+            pkgs = pkgss.${system}.nixpkgs;
             nixpkgsLib = nixpkgs.lib;
             inherit self;
           };
