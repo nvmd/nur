@@ -1,35 +1,74 @@
 {
   description = "My personal NUR repository";
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixos-unstable";
+  };
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      nixpkgs-unstable,
+    }:
     let
       lib = nixpkgs.lib;
       forAllSystems = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
 
-      pkgss = forAllSystems (system: {
-        nixpkgs = import nixpkgs { inherit system; };
-      });
+      # tracked channels to run the `checks` against
+      channels = {
+        stable = nixpkgs;
+        unstable = nixpkgs-unstable;
+      };
+
+      pkgss = forAllSystems (
+        system: lib.mapAttrs (_: channel: import channel { inherit system; }) channels
+      );
+
+      # default channel backs `legacyPackages`, `packages`, `devShells` and the
+      # nur entry point (default.nix)
+      defaultChannel = "stable";
+      defaultPkgs = system: pkgss.${system}.${defaultChannel};
+
+      # the whole check matrix for one channel:
+      # * `pkgs`        package set of the channel
+      # * `nixpkgsLib`  that channel's flake `lib` (needs `nixosSystem`)
+      # Flattened from the nested test registry in ./tests: every check is
+      # named by its attribute path joined with `-`, e.g.
+      # * mktxp-eval-default-user  (eval tests)
+      # * mktxp-basic              (NixOS VM test)
+      mkChecks =
+        {
+          pkgs,
+          nixpkgsLib,
+        }:
+        let
+          tests = import ./tests { inherit pkgs nixpkgsLib self; };
+        in
+        lib.listToAttrs (
+          lib.mapAttrsToListRecursiveCond
+            # derivations are attrsets too; stop descending at them
+            (_: v: !lib.isDerivation v)
+            (path: v: lib.nameValuePair (lib.concatStringsSep "-" path) v)
+            tests
+        );
     in
     {
       legacyPackages = forAllSystems (
         system:
         import ./default.nix {
-          pkgs = pkgss.${system}.nixpkgs;
+          pkgs = defaultPkgs system;
         }
       );
       packages = forAllSystems (
         system: nixpkgs.lib.filterAttrs (_: v: nixpkgs.lib.isDerivation v) self.legacyPackages.${system}
       );
 
-      # NixOS module definitions — importable by downstream configurations as
-      #   imports = [ nur.nixosModules.mktxp ];
       nixosModules = import ./modules/default.nix;
 
       devShells = forAllSystems (
         system:
         let
-          pkgs = pkgss.${system}.nixpkgs;
+          pkgs = defaultPkgs system;
         in
         {
           default = pkgs.mkShell {
@@ -43,26 +82,19 @@
         }
       );
 
-      # Per-system checks, flattened from the nested test registry in ./tests.
-      # Every check is named by its attribute path joined with `-`, e.g.
-      # * mktxp-eval-default-user  (eval tests, every platform)
-      # * mktxp-basic              (NixOS VM test, Linux only)
+      # Per-system checks, run once per tracked channel.
+      # Every attribute is named `<channel>-<check>`, e.g.
+      # * nix build .#checks.aarch64-darwin.stable-mktxp-basic
+      # * nix build .#checks.aarch64-darwin.unstable-mktxp-basic
       checks = forAllSystems (
         system:
-        let
-          tests = import ./tests {
-            pkgs = pkgss.${system}.nixpkgs;
-            nixpkgsLib = nixpkgs.lib;
-            inherit self;
-          };
-        in
-        lib.listToAttrs (
-          lib.mapAttrsToListRecursiveCond
-            # derivations are attrsets too; stop descending at them
-            (_: v: !lib.isDerivation v)
-            (path: v: lib.nameValuePair (lib.concatStringsSep "-" path) v)
-            tests
-        )
+        lib.concatMapAttrs (
+          channelName: channel:
+          lib.mapAttrs' (n: v: lib.nameValuePair "${channelName}-${n}" v) (mkChecks {
+            pkgs = pkgss.${system}.${channelName};
+            nixpkgsLib = channel.lib;
+          })
+        ) channels
       );
     };
 }

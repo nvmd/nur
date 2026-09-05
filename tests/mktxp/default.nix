@@ -12,8 +12,7 @@
     inherit pkgs nixpkgsLib;
     mktxpModule = self.nixosModules.mktxp;
   };
-}
-// nixpkgsLib.optionalAttrs pkgs.stdenv.isLinux {
-  # Full NixOS VM integration test — Linux builders only.
+
+  # nixos vm integration tests
   basic = import ./basic.nix { inherit pkgs self; };
 }
