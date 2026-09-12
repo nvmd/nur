@@ -65,6 +65,9 @@
 
       nixosModules = import ./modules/default.nix;
 
+      # `nix fmt`, or `nix fmt -- --ci` to check without writing.
+      formatter = forAllSystems (system: (defaultPkgs system).nixfmt-tree);
+
       devShells = forAllSystems (
         system:
         let
@@ -75,7 +78,7 @@
             name = "nvmd-nur";
             nativeBuildInputs = with pkgs; [
               nixd
-              nixfmt
+              nixfmt-tree
               nix-output-monitor
             ];
           };
