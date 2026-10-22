@@ -1,0 +1,35 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: ['config:recommended'],
+
+  enabledManagers: ['custom.jsonata'],
+
+  customManagers: [
+    {
+      customType: 'jsonata',
+      description: 'OCI image pins in images.toml',
+      fileFormat: 'toml',
+      managerFilePatterns: ['/(^|/)images\\.toml$/'],
+      matchStrings: [
+        '$each(function($v, $k) { { "depName": $v.repository, "currentValue": $v.tag, "currentDigest": $v.digest } })',
+      ],
+      datasourceTemplate: 'docker',
+      versioningTemplate: 'docker',
+    },
+  ],
+
+  packageRules: [
+    {
+      description: 'One PR for all image updates, majors included',
+      matchManagers: ['custom.jsonata'],
+      groupName: 'container images',
+      separateMajorMinor: false,
+    },
+    {
+      description: 'No PR for a new digest under an unchanged tag',
+      matchManagers: ['custom.jsonata'],
+      matchUpdateTypes: ['digest'],
+      enabled: false,
+    },
+  ],
+}
