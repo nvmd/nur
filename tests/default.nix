@@ -7,4 +7,5 @@
 }:
 {
   mktxp = import ./mktxp { inherit pkgs nixpkgsLib self; };
+  oci-registry = import ./oci-registry { inherit pkgs nixpkgsLib self; };
 }
