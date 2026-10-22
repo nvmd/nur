@@ -1,0 +1,28 @@
+name: Setup Nix
+description: Install Nix and set up the Nix configuration
+
+inputs:
+  github_access_token:
+    description: Token written to nix.conf as `access-tokens = github.com=<token>`.
+    required: false
+    default: ${{ github.token }}
+  extra_nix_config:
+    description: Appended at the end of the nix.conf verbatim.
+    required: false
+    default: ""
+  enable_kvm:
+    description: Enable KVM on Linux runners.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nix
+      uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+      with:
+        github_access_token: ${{ inputs.github_access_token }}
+        enable_kvm: ${{ inputs.enable_kvm }}
+        extra_nix_config: |
+          experimental-features = nix-command flakes
+          ${{ inputs.extra_nix_config }}
