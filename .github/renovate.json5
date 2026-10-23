@@ -10,6 +10,11 @@
   // no auto-detected conventional-commit prefix or lower-casing of titles
   semanticCommits: 'disabled',
 
+  // add the `Image` column to the preexising default columns
+  // it is defined only for docker-datasource updates (packageRules below)
+  // empty columns are omitted
+  prBodyColumns: ['Package', 'Image', 'Type', 'Update', 'Change', 'Pending'],
+
   customManagers: [
     {
       customType: 'jsonata',
@@ -35,6 +40,14 @@
       commitMessageAction: '',
       commitMessageTopic: '{{{depName}}}:',
       commitMessageExtra: '{{{currentValue}}} -> {{{newValue}}}',
+    },
+    {
+      description: 'Link to the image page in the PR table',
+      matchDatasources: ['docker'],
+      // try to reconstruct the full link to the image page
+      prBodyDefinitions: {
+        Image: "{{#if (containsString packageName 'ghcr.io/')}}[{{{packageName}}}](https://{{{packageName}}}){{else if (containsString packageName 'codeberg.org/')}}[{{{packageName}}}:{{{newValue}}}](https://codeberg.org/{{lookup (split packageName '/') 1}}/-/packages/container/{{lookup (split packageName '/') 2}}/{{{newValue}}}){{else}}[{{{packageName}}}:{{{newValue}}}](https://hub.docker.com/r/{{{packageName}}}/tags?name={{{newValue}}}){{/if}}",
+      },
     },
     {
       description: 'No PR for a new digest under an unchanged tag',
