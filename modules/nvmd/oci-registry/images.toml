@@ -21,8 +21,8 @@ digest = "sha256:dbaa52e62e27ce428ba6d7e8130729b3b1cd0151551744e089b61700d1b3e1b
 # https://hub.docker.com/r/jellyfin/jellyfin/tags
 [jellyfin]
 repository = "jellyfin/jellyfin"
-tag = "12.2"
-digest = "sha256:357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce750258a4c059d037"
+tag = "12.3"
+digest = "sha256:2038fe038ab3876a80f6e7b7e0aef6607b032c7dc0c9b3ad3296d0b2eba3bbb5"
 
 # https://codeberg.org/forgejo/-/packages/container/forgejo/versions
 [forgejo]
