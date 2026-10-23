@@ -27,8 +27,8 @@ digest = "sha256:78d3ea1207d1322471fcac39a614f004f2ccf7e878f95ab2977d752f07e4dd7
 # https://codeberg.org/forgejo/-/packages/container/forgejo/versions
 [forgejo]
 repository = "codeberg.org/forgejo/forgejo"
-tag = "13.0.2-rootless"
-digest = "sha256:a704cc203d78a854e0887e08fcbd7a45f9bc2b5fd8551c88b914b044792c4b1b"
+tag = "17.0.0-rootless"
+digest = "sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8"
 
 # https://hub.docker.com/r/lissy93/dashy/tags
 [dashy]
