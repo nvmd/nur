@@ -1,7 +1,5 @@
-name: Evaluate flake
+name: Evaluate
 
-# verifies the flake evaluates (`nix flake check --no-build`)
-# without building or running any `checks` derivation.
 on:
   pull_request:
   workflow_dispatch:
@@ -18,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  eval:
+  check-flake:
     name: "nix flake check --no-build (${{ matrix.system }})"
     runs-on: ubuntu-latest
     strategy:
@@ -33,3 +31,16 @@ jobs:
         uses: ./.github/actions/setup-nix-action
       - name: Evaluate ${{ matrix.system }}
         run: nix flake check --no-build --show-trace --system ${{ matrix.system }}
+
+  validate-renovate:
+    name: "renovate-config-validator"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install nix
+        uses: ./.github/actions/setup-nix-action
+      # renovate from the flake's locked nixpkgs (--inputs-from .)
+      # --strict: also fail when the config needs migration.
+      - name: Validate .github/renovate.json5
+        run: nix shell --inputs-from . nixpkgs#renovate --command renovate-config-validator --strict
