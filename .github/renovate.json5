@@ -4,6 +4,12 @@
 
   enabledManagers: ['custom.jsonata'],
 
+  // default 2: with one PR per image, a daily run would open at most 2
+  prHourlyLimit: 0,
+
+  // no auto-detected conventional-commit prefix or lower-casing of titles
+  semanticCommits: 'disabled',
+
   customManagers: [
     {
       customType: 'jsonata',
@@ -11,7 +17,9 @@
       fileFormat: 'toml',
       managerFilePatterns: ['/(^|/)images\\.toml$/'],
       matchStrings: [
-        '$each(function($v, $k) { { "depName": $v.repository, "currentValue": $v.tag, "currentDigest": $v.digest } })',
+        // depName: images.toml table name, used in PR titles and branch names
+        // packageName: registry repository, used for the lookup
+        '$each(function($v, $k) { { "depName": $k, "packageName": $v.repository, "currentValue": $v.tag, "currentDigest": $v.digest } })',
       ],
       datasourceTemplate: 'docker',
       versioningTemplate: 'docker',
@@ -20,10 +28,13 @@
 
   packageRules: [
     {
-      description: 'One PR for all image updates, majors included',
+      description: 'One PR per image, majors included, titled "<name>: <old tag> -> <new tag>"',
       matchManagers: ['custom.jsonata'],
-      groupName: 'container images',
       separateMajorMinor: false,
+      // the three parts are joined with spaces (empty ones dropped)
+      commitMessageAction: '',
+      commitMessageTopic: '{{{depName}}}:',
+      commitMessageExtra: '{{{currentValue}}} -> {{{newValue}}}',
     },
     {
       description: 'No PR for a new digest under an unchanged tag',
