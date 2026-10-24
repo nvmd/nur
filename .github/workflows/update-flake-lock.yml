@@ -1,0 +1,17 @@
+name: "Update flake.lock"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 0" # run at 00:00 every Sunday
+
+jobs:
+  update-flake-lock:
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@96c5ee93a9dddf2830d31e1da6ec719077336c28 # v3.23.3
+      - uses: DeterminateSystems/update-flake-lock@da03c0f078bc4b2c37ee4f7e072d34bf8f188bb3 # v29
