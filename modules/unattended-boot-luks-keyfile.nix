@@ -146,29 +146,27 @@ in
           ''
         ];
 
-        boot.initrd.systemd.mounts =
-          let
-            disk = cfg.unlockDisks."0-default";
-          in
-          [
-            {
-              what = "${disk.tag}=${disk.value}";
-              # what = "/dev/disk/by-label/KEYS";
-              # what = "UUID=b501f1b9-7714-472c-988f-3c997f146a17";
-              where = unlockDiskMountPoint;
-              options = "ro";
-              type = disk.fs;
-            }
-          ];
+        # only the first disk is mounted: there's no fallback to other disks yet
+        boot.initrd.systemd.mounts = lib.map (disk: {
+          what = "${disk.tag}=${disk.value}";
+          # what = "/dev/disk/by-label/KEYS";
+          # what = "UUID=b501f1b9-7714-472c-988f-3c997f146a17";
+          where = unlockDiskMountPoint;
+          options = "ro";
+          type = disk.fs;
+        }) (lib.take 1 allUnlockDisks);
 
         # is this needed for the password fallback when usb key isn't present?
-        boot.initrd.systemd.services."systemd-cryptsetup@${cfg.luksDeviceName}" = {
-          overrideStrategy = "asDropin";
-          unitConfig = {
-            RequiresMountsFor = [ ];
-            WantsMountsFor = [ unlockDiskMountPoint ];
-          };
-        };
+        boot.initrd.systemd.services = lib.mapAttrs' (
+          deviceName: _:
+          lib.nameValuePair "systemd-cryptsetup@${deviceName}" {
+            overrideStrategy = "asDropin";
+            unitConfig = {
+              RequiresMountsFor = [ ];
+              WantsMountsFor = [ unlockDiskMountPoint ];
+            };
+          }
+        ) cfg.luksDevices;
       })
     ];
 
