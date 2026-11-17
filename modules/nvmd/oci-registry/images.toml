@@ -9,8 +9,8 @@ digest = "sha256:602227a86455d6772e3d16b7d852713c4f864f40df5df894abd1285bb53979a
 # https://github.com/home-assistant/core/pkgs/container/home-assistant/versions?filters%5Bversion_type%5D=tagged
 [home-assistant]
 repository = "ghcr.io/home-assistant/home-assistant"
-tag = "2026.11.1"
-digest = "sha256:6785d1eca68747a524c156faae1b139ed415c07357386ae6fe17291986e59e82"
+tag = "2026.11.2"
+digest = "sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28f"
 
 # https://hub.docker.com/r/nodered/node-red/tags
 [node-red]
