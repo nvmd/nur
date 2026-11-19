@@ -15,8 +15,8 @@ digest = "sha256:493a07e8f6530fc640223f4a0a5248f20a61ca2f718bb1d31efbf08a2c5ea28
 # https://hub.docker.com/r/nodered/node-red/tags
 [node-red]
 repository = "nodered/node-red"
-tag = "4.1.17-22"
-digest = "sha256:0993277cef34b251b87d9c05cce6af49a4f801be8781ff4c8a1962746471f8da"
+tag = "4.1.18-22"
+digest = "sha256:8a6be131ef9adc4283bbac0c03429db071c52154c11db011773c6cfe26608f98"
 
 # https://hub.docker.com/r/jellyfin/jellyfin/tags
 [jellyfin]
