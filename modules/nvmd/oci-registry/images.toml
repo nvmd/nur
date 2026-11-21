@@ -33,5 +33,5 @@ digest = "sha256:39362ab93a94c0c9b8b330d2a877ddbb3f02fa8c0cba1b8d686d437b39f36a0
 # https://hub.docker.com/r/lissy93/dashy/tags
 [dashy]
 repository = "lissy93/dashy"
-tag = "4.9.19"
-digest = "sha256:7243dd17b584490c740d24b18e77e464ef3aa4616dfc1fc5a347dfab6057dd9f"
+tag = "4.9.20"
+digest = "sha256:f623433bda0ac65777dbbf179225300e11a554d88c8be2ebf0f964b12d06b9d6"
